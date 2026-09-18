@@ -150,6 +150,14 @@ pub struct UpdateAppRequest {
     pub sort_order: i32,
 }
 
+/// GitHub Releases 等接口里的发布附件
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UpdateAsset {
+    pub browser_download_url: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// 更新源返回的清单（JSON），字段名尽量宽容，兼容常见的几种写法。
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UpdateManifest {
@@ -171,6 +179,28 @@ pub struct UpdateManifest {
     /// 是否强制更新（强制时前端不提供“忽略/稍后”）
     #[serde(default)]
     pub mandatory: bool,
+    /// 发布附件（GitHub Releases 会带这一项）
+    #[serde(default)]
+    pub assets: Option<Vec<UpdateAsset>>,
+}
+
+impl UpdateManifest {
+    /// 下载地址：优先第一个发布附件（GitHub 上传的安装包），其次清单里的 url。
+    pub fn download_url(&self) -> Option<String> {
+        let preferred = self
+            .assets
+            .as_ref()
+            .and_then(|assets| {
+                assets
+                    .iter()
+                    .find_map(|asset| asset.browser_download_url.clone())
+            })
+            .or_else(|| self.url.clone());
+
+        preferred
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
 }
 
 /// 更新检查设置

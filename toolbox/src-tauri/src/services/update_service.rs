@@ -9,11 +9,13 @@ const TIMEOUT: Duration = Duration::from_secs(8);
 /// 自动检查的最小间隔：间隔内直接复用上次结果，不重复联网
 pub const CHECK_INTERVAL_SECS: i64 = 6 * 60 * 60;
 
-/// 预置更新源。
-///
-/// 留空时由用户在「设置 → 版本更新」中填写；若想新装的机器开箱即用，
-/// 在这里填上更新清单地址即可（用户仍可在设置里覆盖）。
-pub const DEFAULT_SOURCE_URL: &str = "";
+/// 预置更新源：项目发布在 GitHub，默认取最新 Release 的信息
+/// （`tag_name` 当版本号、`body` 当更新说明、`assets` 或 `html_url` 当下载地址）。
+/// 用户可在「设置 → 版本更新」里改成自己的地址。
+pub const DEFAULT_SOURCE_URL: &str =
+    "https://api.github.com/repos/WeedFire/baibaoxiang/releases/latest";
+
+const ERR_404: &str = "更新源未找到（HTTP 404）：请检查地址，或该项目还没有发布正式版本";
 
 const KEY_ENABLED: &str = "update_check_enabled";
 const KEY_SOURCE: &str = "update_source_url";
@@ -106,9 +108,10 @@ fn store_cache(conn: &Connection, manifest: &UpdateManifest, now: i64) -> Result
     data_service::set_setting(conn, KEY_CHECKED_AT, &now.to_string())?;
     data_service::set_setting(conn, KEY_MANDATORY, if manifest.mandatory { "1" } else { "0" })?;
 
+    let download_url = manifest.download_url();
     let optional = [
         (KEY_NOTES, manifest.notes.as_deref()),
-        (KEY_URL, manifest.url.as_deref()),
+        (KEY_URL, download_url.as_deref()),
     ];
     for (key, value) in optional {
         match value.map(|v| v.trim()).filter(|v| !v.is_empty()) {
@@ -178,30 +181,54 @@ pub fn parse_manifest(text: &str) -> Result<UpdateManifest, String> {
 }
 
 /// 读取更新清单：`http(s)://` 走网络，其它按本地路径读取（支持局域网共享目录）。
-pub fn fetch_manifest(source: &str) -> Result<UpdateManifest, String> {
+/// `user_agent` 会随请求发出，GitHub 等接口要求带 User-Agent。
+pub fn fetch_manifest(source: &str, user_agent: &str) -> Result<UpdateManifest, String> {
     let source = source.trim();
     if source.is_empty() {
         return Err("尚未配置更新源地址".to_string());
     }
 
     let text = if source.starts_with("http://") || source.starts_with("https://") {
-        fetch_over_http(source)?
+        fetch_over_http(source, user_agent)?
     } else {
         fetch_over_file(source)?
     };
     parse_manifest(&text)
 }
 
-fn fetch_over_http(url: &str) -> Result<String, String> {
+fn fetch_over_http(url: &str, user_agent: &str) -> Result<String, String> {
+    // Windows 走系统 SChannel：必须显式指定 provider，
+    // ureq 默认用 rustls，未启用该 feature 时请求 https 会直接 panic。
+    let tls_config = ureq::tls::TlsConfig::builder()
+        .provider(ureq::tls::TlsProvider::NativeTls)
+        .build();
     let config = ureq::config::Config::builder()
         .timeout_global(Some(TIMEOUT))
+        .tls_config(tls_config)
         .build();
     let agent = ureq::Agent::new_with_config(config);
 
-    let mut response = agent
+    let response = agent
         .get(url)
-        .call()
-        .map_err(|e| format!("请求更新源失败: {}", e))?;
+        .header("User-Agent", user_agent)
+        .header("Accept", "application/json")
+        .call();
+
+    let mut response = match response {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(404)) => return Err(ERR_404.to_string()),
+        Err(error) => return Err(format!("请求更新源失败: {}", error)),
+    };
+
+    // 4xx/5xx 是否转成 Err 取决于 ureq 配置，这里再兜一层
+    let status = response.status().as_u16();
+    if status == 404 {
+        return Err(ERR_404.to_string());
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!("更新源返回 HTTP {}", status));
+    }
+
     response
         .body_mut()
         .read_to_string()
@@ -273,7 +300,9 @@ pub fn check_update(
         );
     }
 
-    match fetch_manifest(&settings.source_url) {
+    // GitHub 等接口要求请求带 User-Agent
+    let user_agent = format!("baibaoxiang/{}", current_version);
+    match fetch_manifest(&settings.source_url, &user_agent) {
         Ok(manifest) => {
             let _ = store_cache(conn, &manifest, now);
             let cache = load_cache(conn);
@@ -376,6 +405,42 @@ mod tests {
         assert!(manifest.mandatory);
     }
 
+    /// GitHub Releases 接口返回的形状：tag_name 当版本、body 当说明、assets 当下载地址。
+    #[test]
+    fn parses_github_release_payload() {
+        // body 里的 "## 修复" 含 `"##`，用 r###"..."### 避免提前结束原始字符串
+        let json = r###"{
+            "html_url": "https://github.com/WeedFire/baibaoxiang/releases/tag/v1.0.2",
+            "tag_name": "v1.0.2",
+            "body": "## 修复\n- 启动更快",
+            "draft": false,
+            "prerelease": false,
+            "assets": [
+                { "name": "百宝箱_1.0.2_x64_zh-CN.msi",
+                  "browser_download_url": "https://github.com/WeedFire/baibaoxiang/releases/download/v1.0.2/a.msi" }
+            ]
+        }"###;
+        let manifest = parse_manifest(json).unwrap();
+        assert_eq!(manifest.version, "v1.0.2");
+        assert!(manifest.notes.as_deref().unwrap().contains("启动更快"));
+        // 有发布附件时优先附件，而不是 release 页面
+        assert_eq!(
+            manifest.download_url().as_deref(),
+            Some("https://github.com/WeedFire/baibaoxiang/releases/download/v1.0.2/a.msi")
+        );
+        assert!(is_newer(&manifest.version, "1.0.1"));
+    }
+
+    #[test]
+    fn falls_back_to_release_page_without_assets() {
+        let json = r#"{ "tag_name": "v1.0.2", "html_url": "https://github.com/x/y/releases/tag/v1.0.2", "assets": [] }"#;
+        let manifest = parse_manifest(json).unwrap();
+        assert_eq!(
+            manifest.download_url().as_deref(),
+            Some("https://github.com/x/y/releases/tag/v1.0.2")
+        );
+    }
+
     #[test]
     fn rejects_manifest_without_version() {
         assert!(parse_manifest("{}").is_err());
@@ -407,7 +472,7 @@ mod tests {
         });
 
         let source = format!("http://127.0.0.1:{}/update.json", port);
-        let manifest = fetch_manifest(&source).unwrap();
+        let manifest = fetch_manifest(&source, "baibaoxiang/test").unwrap();
         assert_eq!(manifest.version, "9.9.9");
         assert_eq!(manifest.notes.as_deref(), Some("来自网络"));
         let _ = server.join();
@@ -535,21 +600,26 @@ mod tests {
     }
 
     #[test]
-    fn disabled_or_unconfigured_checks_do_not_fail() {
+    fn disabled_check_skips_network() {
         let conn = db();
         save_settings(
             &conn,
             &UpdateSettings {
                 enabled: false,
-                source_url: String::new(),
+                source_url: DEFAULT_SOURCE_URL.to_string(),
             },
         )
         .unwrap();
 
-        let disabled = check_update(&conn, "1.0.1", false, 1_000);
-        assert_eq!(disabled.status, "disabled");
-        assert!(!disabled.has_update);
+        let result = check_update(&conn, "1.0.1", false, 1_000);
+        assert_eq!(result.status, "disabled");
+        assert!(!result.has_update);
+    }
 
+    /// 更新源留空时回退到预置地址，保证新装机器开箱即用。
+    #[test]
+    fn blank_source_falls_back_to_default() {
+        let conn = db();
         save_settings(
             &conn,
             &UpdateSettings {
@@ -558,12 +628,26 @@ mod tests {
             },
         )
         .unwrap();
-        let unconfigured = check_update(&conn, "1.0.1", false, 1_000);
-        assert_eq!(unconfigured.status, "unconfigured");
-        assert!(!unconfigured.has_update);
 
-        // 设置默认值：开启自动检查
+        assert_eq!(load_settings(&conn).source_url, DEFAULT_SOURCE_URL);
+
         let state = load_state(&conn, "1.0.1");
         assert_eq!(state.current_version, "1.0.1");
+        assert!(state.settings.enabled);
+    }
+
+    /// 手动验证真实更新源：`cargo test --lib -- --ignored --nocapture`
+    /// 仓库没有发布版本时应得到 404 提示，发布后应解析出版本号与下载地址。
+    #[test]
+    #[ignore]
+    fn live_default_source() {
+        let result = fetch_manifest(DEFAULT_SOURCE_URL, "baibaoxiang/test");
+        match result {
+            Ok(manifest) => {
+                println!("version={} url={:?}", manifest.version, manifest.download_url());
+                println!("notes={:?}", manifest.notes);
+            }
+            Err(err) => println!("error={}", err),
+        }
     }
 }
