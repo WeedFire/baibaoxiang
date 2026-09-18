@@ -1,0 +1,63 @@
+use crate::db;
+use crate::models::{AddAppRequest, AppItem, UpdateAppRequest};
+use crate::services::{data_service, icon_service};
+use tauri::AppHandle;
+
+#[tauri::command]
+pub fn get_apps_by_group(app: AppHandle, group_id: String) -> Result<Vec<AppItem>, String> {
+    let conn = db::get_connection(&app)?;
+    data_service::get_apps_by_group(&conn, &group_id)
+}
+
+#[tauri::command]
+pub fn get_app_by_id(app: AppHandle, app_id: String) -> Result<AppItem, String> {
+    let conn = db::get_connection(&app)?;
+    data_service::get_app_by_id(&conn, &app_id)
+}
+
+#[tauri::command]
+pub fn add_app(app: AppHandle, req: AddAppRequest) -> Result<AppItem, String> {
+    let conn = db::get_connection(&app)?;
+    let created = data_service::add_app(&conn, &req)?;
+
+    // 保存后自动提取图标：失败不影响应用本身
+    match icon_service::extract_icon(
+        &app,
+        &created.executable_path,
+        created.python_interpreter_path.as_deref(),
+    ) {
+        Ok(Some(icon)) => {
+            let _ = data_service::set_icon_path(&conn, &created.id, Some(&icon));
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("[icon] {}", e),
+    }
+
+    Ok(data_service::get_app_by_id(&conn, &created.id)?)
+}
+
+#[tauri::command]
+pub fn update_app(app: AppHandle, req: UpdateAppRequest) -> Result<AppItem, String> {
+    let conn = db::get_connection(&app)?;
+    let updated = data_service::update_app(&conn, &req)?;
+
+    match icon_service::extract_icon(
+        &app,
+        &updated.executable_path,
+        updated.python_interpreter_path.as_deref(),
+    ) {
+        Ok(Some(icon)) => {
+            let _ = data_service::set_icon_path(&conn, &updated.id, Some(&icon));
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("[icon] {}", e),
+    }
+
+    Ok(data_service::get_app_by_id(&conn, &updated.id)?)
+}
+
+#[tauri::command]
+pub fn delete_app(app: AppHandle, app_id: String) -> Result<(), String> {
+    let conn = db::get_connection(&app)?;
+    data_service::delete_app(&conn, &app_id)
+}

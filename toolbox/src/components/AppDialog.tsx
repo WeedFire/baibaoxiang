@@ -1,0 +1,568 @@
+import { useCallback, useEffect, useState } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
+import {
+  api,
+  defaultNameFromPath,
+  iconUrl,
+  looksLikePythonScript,
+  type AppItem,
+  type PathInspection,
+  type PythonInstallation,
+} from '../lib/tauri';
+import { useAppStore } from '../store/appStore';
+import './AppDialog.css';
+
+interface AppDialogProps {
+  mode: 'add' | 'edit';
+  appId?: string;
+  onClose: () => void;
+  onSaved: () => void;
+}
+
+interface FormData {
+  name: string;
+  executable_path: string;
+  arguments: string;
+  working_directory: string;
+  startup_window_style: number;
+  is_python_script: boolean;
+  python_interpreter_path: string;
+  show_console: boolean;
+  run_as_admin: boolean;
+  allow_multiple_instances: boolean;
+  group_id: string;
+}
+
+const defaultForm: FormData = {
+  name: '',
+  executable_path: '',
+  arguments: '',
+  working_directory: '',
+  startup_window_style: 0,
+  is_python_script: false,
+  python_interpreter_path: '',
+  show_console: false,
+  run_as_admin: false,
+  allow_multiple_instances: true,
+  group_id: 'default',
+};
+
+const PROGRAM_FILTERS = [
+  { name: '程序与脚本', extensions: ['exe', 'lnk', 'bat', 'cmd', 'ps1', 'py', 'pyw', 'msc', 'cpl'] },
+  { name: '所有文件', extensions: ['*'] },
+];
+
+const PYTHON_FILTERS = [{ name: 'Python 解释器', extensions: ['exe'] }];
+
+function sourceLabel(source: string): string {
+  switch (source) {
+    case 'py-launcher':
+      return '启动器';
+    case 'venv':
+      return '虚拟环境';
+    case 'conda':
+      return 'Conda';
+    case 'programs-dir':
+      return '安装目录';
+    case 'path':
+      return 'PATH';
+    case 'bundled':
+      return '内置';
+    default:
+      return source;
+  }
+}
+
+export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
+  const { groups, currentGroupId } = useAppStore();
+  const [form, setForm] = useState<FormData>({
+    ...defaultForm,
+    group_id: currentGroupId || 'default',
+  });
+  const [errors, setErrors] = useState<Partial<Record<keyof FormData, string>>>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(mode === 'edit');
+  const [pythonOptions, setPythonOptions] = useState<PythonInstallation[]>([]);
+  const [detecting, setDetecting] = useState(false);
+  const [showPythonDropdown, setShowPythonDropdown] = useState(false);
+  const [iconPreview, setIconPreview] = useState<string | null>(null);
+  const [pathInfo, setPathInfo] = useState<PathInspection | null>(null);
+
+  useEffect(() => {
+    if (mode === 'edit' && appId) {
+      void loadApp(appId);
+    }
+  }, [mode, appId]);
+
+  const loadApp = async (id: string) => {
+    setLoading(true);
+    try {
+      const app: AppItem = await api.getAppById(id);
+      setForm({
+        name: app.name,
+        executable_path: app.executable_path,
+        arguments: app.arguments ?? '',
+        working_directory: app.working_directory ?? '',
+        startup_window_style: app.startup_window_style,
+        is_python_script: app.is_python_script,
+        python_interpreter_path: app.python_interpreter_path ?? '',
+        show_console: app.show_console,
+        run_as_admin: app.run_as_admin,
+        allow_multiple_instances: app.allow_multiple_instances,
+        group_id: app.group_id,
+      });
+    } catch (err) {
+      setFormError(`读取应用失败：${String(err)}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 路径变化后解析真实位置（相对路径以程序安装目录为根）并自动预览图标
+  useEffect(() => {
+    const target = form.executable_path.trim();
+    if (!target) {
+      setPathInfo(null);
+      setIconPreview(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const info = await api.inspectAppPath(target);
+        if (cancelled) return;
+        setPathInfo(info);
+        if (!info.exists) {
+          setIconPreview(null);
+          return;
+        }
+        // 统一用解析后的绝对路径取图标，避免后端重复解析
+        const icon = await api.extractIcon(
+          info.resolved,
+          form.is_python_script ? form.python_interpreter_path : null,
+        );
+        if (!cancelled) setIconPreview(iconUrl(icon));
+      } catch {
+        if (!cancelled) {
+          setPathInfo(null);
+          setIconPreview(null);
+        }
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    form.executable_path,
+    form.is_python_script,
+    form.python_interpreter_path,
+  ]);
+
+  const detectPython = useCallback(async (scriptPath: string) => {
+    setDetecting(true);
+    setShowPythonDropdown(true);
+    try {
+      // 优先展示脚本目录附近的虚拟环境，再展示系统解释器
+      const venv = scriptPath ? await api.detectScriptVenv(scriptPath) : null;
+      const all = await api.detectPython();
+      const merged = venv ? [venv, ...all.filter((p) => p.path !== venv.path)] : all;
+      setPythonOptions(merged);
+      return merged;
+    } catch (err) {
+      console.error('Failed to detect Python:', err);
+      setPythonOptions([]);
+      return [];
+    } finally {
+      setDetecting(false);
+    }
+  }, []);
+
+  const updateField = <K extends keyof FormData>(key: K, value: FormData[K]) => {
+    setForm((prev) => ({ ...prev, [key]: value }));
+    if (errors[key]) {
+      setErrors((prev) => ({ ...prev, [key]: undefined }));
+    }
+  };
+
+  const handlePathChange = (value: string) => {
+    setForm((prev) => {
+      const next = { ...prev, executable_path: value };
+      if (looksLikePythonScript(value)) {
+        // 不强制打开控制台：GUI 脚本（自带窗口）应保持不勾选，避免弹出命令行页面；
+        // 纯命令行脚本可在下方「显示控制台」中手动勾选以查看输出。
+        next.is_python_script = true;
+        if (!prev.name.trim()) {
+          next.name = defaultNameFromPath(value);
+        }
+      }
+      return next;
+    });
+    if (errors.executable_path) {
+      setErrors((prev) => ({ ...prev, executable_path: undefined }));
+    }
+  };
+
+  // Python 脚本若未指定解释器，自动选一个可用的
+  useEffect(() => {
+    if (!form.is_python_script || form.python_interpreter_path.trim()) return;
+    let cancelled = false;
+    void (async () => {
+      const list = await detectPython(form.executable_path);
+      if (!cancelled && list.length > 0) {
+        // 内置解释器优先保存成相对写法，换台机器/换安装目录依然可用
+        const preferred = list[0].relative_path || list[0].path;
+        setForm((prev) =>
+          prev.python_interpreter_path.trim()
+            ? prev
+            : { ...prev, python_interpreter_path: preferred },
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [form.is_python_script, form.executable_path, form.python_interpreter_path, detectPython]);
+
+  const browse = async (
+    kind: 'program' | 'python' | 'directory',
+    onPicked: (value: string) => void,
+  ) => {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: kind === 'directory',
+        filters: kind === 'program' ? PROGRAM_FILTERS : kind === 'python' ? PYTHON_FILTERS : undefined,
+        title:
+          kind === 'program' ? '选择程序或脚本' : kind === 'python' ? '选择 Python 解释器' : '选择工作目录',
+      });
+      const value = Array.isArray(selected) ? selected[0] : selected;
+      if (value) onPicked(value);
+    } catch (err) {
+      console.error('选择文件失败:', err);
+    }
+  };
+
+  const validate = (): boolean => {
+    const newErrors: Partial<Record<keyof FormData, string>> = {};
+    if (!form.name.trim()) newErrors.name = '请输入应用名称';
+    if (!form.executable_path.trim()) newErrors.executable_path = '请输入路径';
+    if (form.is_python_script && !form.python_interpreter_path.trim()) {
+      newErrors.python_interpreter_path = 'Python 脚本需要指定解释器';
+    }
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError(null);
+    if (!validate()) return;
+
+    setSaving(true);
+    try {
+      const payload = {
+        group_id: form.group_id,
+        name: form.name.trim(),
+        executable_path: form.executable_path.trim(),
+        arguments: form.arguments.trim() || null,
+        working_directory: form.working_directory.trim() || null,
+        startup_window_style: form.startup_window_style,
+        is_python_script: form.is_python_script,
+        python_interpreter_path: form.is_python_script
+          ? form.python_interpreter_path.trim()
+          : null,
+        show_console: form.show_console,
+        run_as_admin: form.run_as_admin,
+        allow_multiple_instances: form.allow_multiple_instances,
+        icon_path: null,
+      };
+
+      if (mode === 'add') {
+        await api.addApp(payload);
+      } else if (appId) {
+        await api.updateApp({
+          ...payload,
+          id: appId,
+          sort_order: 0,
+        });
+      }
+      onSaved();
+      onClose();
+    } catch (err) {
+      setFormError(`保存失败：${String(err)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="dialog-overlay" onClick={onClose}>
+        <div className="dialog dialog-loading" onClick={(e) => e.stopPropagation()}>
+          <div className="loading-spinner" />
+          <p>加载中...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-header">
+          <h2>{mode === 'add' ? '添加应用' : '编辑应用'}</h2>
+          <button className="dialog-close" onClick={onClose} title="关闭">
+            ×
+          </button>
+        </div>
+
+        <form className="dialog-form" onSubmit={handleSubmit}>
+          {formError && <div className="form-banner-error">{formError}</div>}
+
+          <div className="form-group">
+            <label htmlFor="name">名称 *</label>
+            <input
+              id="name"
+              type="text"
+              value={form.name}
+              onChange={(e) => updateField('name', e.target.value)}
+              placeholder="例如：VS Code"
+              className={errors.name ? 'error' : ''}
+            />
+            {errors.name && <span className="form-error">{errors.name}</span>}
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="path">路径 *</label>
+            <div className="input-row">
+              {iconPreview ? (
+                <img className="input-icon-preview" src={iconPreview} alt="" />
+              ) : (
+                <span className="input-icon-preview placeholder">📦</span>
+              )}
+              <input
+                id="path"
+                type="text"
+                value={form.executable_path}
+                onChange={(e) => handlePathChange(e.target.value)}
+                placeholder={String.raw`C:\Program Files\App\app.exe 或 D:\script\main.py`}
+                className={errors.executable_path ? 'error' : ''}
+              />
+              <button
+                type="button"
+                className="btn-detect"
+                onClick={() => browse('program', handlePathChange)}
+              >
+                浏览
+              </button>
+            </div>
+            {errors.executable_path && (
+              <span className="form-error">{errors.executable_path}</span>
+            )}
+            {pathInfo &&
+              (pathInfo.exists
+                ? pathInfo.is_relative && (
+                    <span className="form-hint">相对路径，解析为：{pathInfo.resolved}</span>
+                  )
+                : (
+                    <span className="form-error">路径不存在：{pathInfo.resolved}</span>
+                  ))}
+            <span className="form-hint">
+              支持相对路径，相对程序安装目录解析（如 pyTools\excel_merge\run_excel_merge.py）
+            </span>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="args">参数</label>
+            <input
+              id="args"
+              type="text"
+              value={form.arguments}
+              onChange={(e) => updateField('arguments', e.target.value)}
+              placeholder='--flag value 或 "D:\my data\file.txt"'
+            />
+            <span className="form-hint">含空格的参数请用英文双引号包裹</span>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="workdir">工作目录</label>
+            <div className="input-row">
+              <input
+                id="workdir"
+                type="text"
+                value={form.working_directory}
+                onChange={(e) => updateField('working_directory', e.target.value)}
+                placeholder="留空则自动使用程序/脚本所在目录"
+              />
+              <button
+                type="button"
+                className="btn-detect"
+                onClick={() =>
+                  browse('directory', (v) => updateField('working_directory', v))
+                }
+              >
+                浏览
+              </button>
+            </div>
+          </div>
+
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="group">分组</label>
+              <select
+                id="group"
+                value={form.group_id}
+                onChange={(e) => updateField('group_id', e.target.value)}
+              >
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="window">窗口样式</label>
+              <select
+                id="window"
+                value={form.startup_window_style}
+                onChange={(e) =>
+                  updateField('startup_window_style', Number(e.target.value))
+                }
+              >
+                <option value={0}>正常</option>
+                <option value={1}>最大化</option>
+                <option value={2}>最小化</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="form-checkboxes">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.is_python_script}
+                onChange={(e) => {
+                  updateField('is_python_script', e.target.checked);
+                  // 勾选 Python 脚本时默认不显示控制台（GUI 脚本自带窗口）；
+                  // 命令行脚本可手动勾选下方「显示控制台」。
+                  if (e.target.checked) updateField('show_console', false);
+                }}
+              />
+              <span>Python 脚本</span>
+            </label>
+
+            {form.is_python_script && (
+              <div className="form-group nested">
+                <label htmlFor="python">Python 解释器 *</label>
+                <div className="input-row">
+                  <input
+                    id="python"
+                    type="text"
+                    value={form.python_interpreter_path}
+                    onChange={(e) =>
+                      updateField('python_interpreter_path', e.target.value)
+                    }
+                    placeholder="python.exe 的完整路径，或相对路径"
+                    className={errors.python_interpreter_path ? 'error' : ''}
+                  />
+                  <button
+                    type="button"
+                    className="btn-detect"
+                    onClick={() => browse('python', (v) => updateField('python_interpreter_path', v))}
+                  >
+                    浏览
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-detect"
+                    onClick={() => void detectPython(form.executable_path)}
+                    disabled={detecting}
+                  >
+                    {detecting ? '检测中...' : '检测'}
+                  </button>
+                </div>
+                {errors.python_interpreter_path && (
+                  <span className="form-error">{errors.python_interpreter_path}</span>
+                )}
+                <span className="form-hint">
+                  可填相对路径，同样相对程序安装目录解析（如 python\python.exe）
+                </span>
+
+                {showPythonDropdown && (
+                  <div className="python-dropdown">
+                    {pythonOptions.length === 0 && !detecting && (
+                      <div className="python-empty">未检测到 Python，请手动浏览选择</div>
+                    )}
+                    {pythonOptions.map((opt) => (
+                      <button
+                        key={opt.path}
+                        type="button"
+                        className="python-option"
+                        onClick={() => {
+                          updateField(
+                            'python_interpreter_path',
+                            opt.relative_path || opt.path,
+                          );
+                          setShowPythonDropdown(false);
+                        }}
+                      >
+                        <span className="python-option-path">{opt.path}</span>
+                        <span className="python-option-meta">
+                          {opt.version ? `Python ${opt.version}` : '版本未知'}
+                          {' · '}
+                          {sourceLabel(opt.source)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.run_as_admin}
+                onChange={(e) => updateField('run_as_admin', e.target.checked)}
+              />
+              <span>以管理员身份运行</span>
+            </label>
+
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.show_console}
+                onChange={(e) => updateField('show_console', e.target.checked)}
+              />
+              <span>显示控制台（命令行脚本勾选以查看输出；GUI 脚本保持不勾选，否则会多弹一个黑窗）</span>
+            </label>
+
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.allow_multiple_instances}
+                onChange={(e) =>
+                  updateField('allow_multiple_instances', e.target.checked)
+                }
+              />
+              <span>允许多实例（取消后已在运行则不重复启动）</span>
+            </label>
+          </div>
+
+          <div className="dialog-footer">
+            <button type="button" className="btn-cancel" onClick={onClose}>
+              取消
+            </button>
+            <button type="submit" className="btn-save" disabled={saving}>
+              {saving ? '保存中...' : '保存'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

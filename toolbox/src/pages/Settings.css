@@ -1,0 +1,161 @@
+.settings-dialog {
+  width: 440px;
+}
+
+.settings-content {
+  padding: 0 24px 24px;
+}
+
+.settings-section {
+  margin-bottom: 24px;
+}
+
+.settings-section h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1E2A20;
+  margin: 0 0 8px 0;
+}
+
+.settings-desc {
+  font-size: 13px;
+  color: #5C6B5E;
+  margin: 0 0 16px 0;
+  line-height: 1.5;
+}
+
+.settings-desc.muted {
+  color: #6B7A6D;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.settings-btn {
+  flex: 1;
+  padding: 10px 16px;
+  background: #EFF8F0;
+  color: #2F3A30;
+  border: 1px solid #A9D6AE;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.settings-btn:hover:not(:disabled) {
+  background: #E0F1E2;
+  border-color: #9BCBA1;
+}
+
+.settings-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-message {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.settings-message.success {
+  background: rgba(74, 222, 128, 0.15);
+  color: #1f8a4c;
+  border: 1px solid rgba(74, 222, 128, 0.3);
+}
+
+.settings-message.error {
+  background: rgba(255, 107, 107, 0.12);
+  color: #c0392b;
+  border: 1px solid rgba(255, 107, 107, 0.3);
+}
+
+.settings-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #2F3A30;
+  margin-bottom: 14px;
+  cursor: pointer;
+}
+
+.settings-checkbox input {
+  width: 16px;
+  height: 16px;
+  accent-color: #4a9eff;
+  cursor: pointer;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.settings-field label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1E2A20;
+}
+
+.settings-field input {
+  padding: 8px 10px;
+  border: 1px solid #A9D6AE;
+  border-radius: 6px;
+  background: #F7FCF8;
+  color: #2F3A30;
+  font-size: 13px;
+  outline: none;
+}
+
+.settings-field input:focus {
+  border-color: #4a9eff;
+  background: #fff;
+}
+
+.settings-hint {
+  font-size: 12px;
+  color: #6B7A6D;
+  line-height: 1.5;
+}
+
+.settings-link {
+  margin-left: 8px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: #2b7cd3;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.settings-details {
+  margin-top: 16px;
+  font-size: 12px;
+  color: #5C6B5E;
+}
+
+.settings-details summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: #2b7cd3;
+}
+
+.settings-details pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #CBE6CF;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+}

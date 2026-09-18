@@ -1,0 +1,107 @@
+.group-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-bottom: 1px solid #A9D6AE;
+}
+
+.group-tabs-list {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+  overflow-x: auto;
+}
+
+.group-tab {
+  padding: 6px 16px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #5C6B5E;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.group-tab:hover {
+  background-color: rgba(0, 0, 0, 0.06);
+  color: #1E2A20;
+}
+
+.group-tab.active {
+  background-color: #4a9eff;
+  color: #fff;
+}
+
+.group-tab.dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+.group-tab.drag-over {
+  border-left: 2px solid #4a9eff;
+  margin-left: -2px;
+}
+
+.group-add-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 4px;
+  background-color: rgba(0, 0, 0, 0.06);
+  color: #5C6B5E;
+  cursor: pointer;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.group-add-btn:hover {
+  background-color: rgba(0, 0, 0, 0.12);
+  color: #1E2A20;
+}
+
+.group-create {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.group-create-input {
+  width: 120px;
+  padding: 5px 8px;
+  background: #EFF8F0;
+  border: 1px solid #4a9eff;
+  border-radius: 4px;
+  color: #2F3A30;
+  font-size: 13px;
+  outline: none;
+}
+
+.group-create-ok,
+.group-create-cancel {
+  padding: 5px 10px;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.group-create-ok {
+  background: #4a9eff;
+  color: #fff;
+}
+
+.group-create-cancel {
+  background: transparent;
+  color: #5C6B5E;
+  border: 1px solid #A9D6AE;
+}
+
+.group-create-cancel:hover {
+  color: #1E2A20;
+}

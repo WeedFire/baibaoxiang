@@ -1,0 +1,69 @@
+.layout-canvas {
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.layout-auto {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 8px;
+  align-content: start;
+}
+
+.layout-manual {
+  position: relative;
+  min-height: 500px;
+  user-select: none;
+  touch-action: none;
+}
+
+.layout-manual.is-dragging {
+  cursor: grabbing;
+}
+
+.layout-manual-item {
+  position: absolute;
+  cursor: grab;
+  touch-action: none;
+}
+
+.layout-manual-item:active {
+  cursor: grabbing;
+}
+
+.layout-manual-item.dragging {
+  z-index: 100;
+  opacity: 0.9;
+}
+
+.layout-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: #5C6B5E;
+}
+
+.layout-empty,
+.layout-empty-manual {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: #5C6B5E;
+}
+
+.layout-empty p,
+.layout-empty-manual p {
+  margin: 0;
+}
+
+.layout-empty-hint {
+  font-size: 14px;
+  margin-top: 8px !important;
+  color: #6B7A6D;
+}

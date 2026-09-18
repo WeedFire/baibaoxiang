@@ -1,0 +1,320 @@
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+
+.dialog {
+  background: #EFF8F0;
+  border-radius: 12px;
+  width: 480px;
+  max-width: 90vw;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 0;
+}
+
+.dialog-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #1E2A20;
+}
+
+.dialog-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #5C6B5E;
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.dialog-close:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: #1E2A20;
+}
+
+.dialog-form {
+  padding: 20px 24px 24px;
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: #5C6B5E;
+  margin-bottom: 6px;
+}
+
+.form-group input,
+.form-group select {
+  width: 100%;
+  padding: 10px 12px;
+  background: #F4FBF5;
+  border: 1px solid #A9D6AE;
+  border-radius: 6px;
+  color: #2F3A30;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.form-group input:focus,
+.form-group select:focus {
+  border-color: #4a9eff;
+}
+
+.form-group input.error,
+.form-group select.error {
+  border-color: #ff6b6b;
+}
+
+.form-group input::placeholder {
+  color: #6B7A6D;
+}
+
+.form-error {
+  display: block;
+  font-size: 12px;
+  color: #c0392b;
+  margin-top: 4px;
+}
+
+.form-group.nested {
+  margin-top: 8px;
+  margin-left: 24px;
+}
+
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+
+.form-row .form-group {
+  flex: 1;
+}
+
+.form-hint {
+  display: block;
+  font-size: 11px;
+  color: #6B7A6D;
+  margin-top: 4px;
+}
+
+.form-banner-error {
+  background: rgba(255, 107, 107, 0.12);
+  border: 1px solid rgba(255, 107, 107, 0.4);
+  color: #c0392b;
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+  word-break: break-word;
+}
+
+.dialog-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px;
+  color: #5C6B5E;
+  font-size: 14px;
+}
+
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.input-icon-preview {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+.input-icon-preview.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  background: #F4FBF5;
+  border: 1px solid #A9D6AE;
+}
+
+.python-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.python-option-path {
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.python-option-meta {
+  font-size: 11px;
+  color: #5C6B5E;
+}
+
+.form-checkboxes {
+  margin-bottom: 20px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 14px;
+  color: #2F3A30;
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #4a9eff;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid #A9D6AE;
+}
+
+.btn-cancel,
+.btn-save {
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-cancel {
+  background: transparent;
+  color: #5C6B5E;
+  border: 1px solid #A9D6AE;
+}
+
+.btn-cancel:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: #1E2A20;
+}
+
+.btn-save {
+  background: #4a9eff;
+  color: #fff;
+  border: none;
+}
+
+.btn-save:hover {
+  background: #3a8eef;
+}
+
+.btn-save:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.python-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.python-input-row input {
+  flex: 1;
+}
+
+.btn-detect {
+  padding: 8px 12px;
+  background: #E0F1E2;
+  color: #2F3A30;
+  border: 1px solid #A9D6AE;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.btn-detect:hover:not(:disabled) {
+  background: #D6ECD9;
+  border-color: #9BCBA1;
+}
+
+.btn-detect:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.python-dropdown {
+  margin-top: 8px;
+  background: #F4FBF5;
+  border: 1px solid #A9D6AE;
+  border-radius: 6px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.python-option {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  color: #2F3A30;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.python-option:hover {
+  background: #E0F1E2;
+}
+
+.python-empty {
+  padding: 12px;
+  color: #6B7A6D;
+  font-size: 13px;
+  text-align: center;
+}

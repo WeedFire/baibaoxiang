@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="zh-CN" Codepage="936" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="TauriLanguage">2052</String>
+  <String Id="TauriCodepage">936</String>
+  <String Id="LaunchApp">运行 百宝箱</String>
+  <String Id="DowngradeErrorMessage">已安装了更新版本的 百宝箱。</String>
+  <String Id="PathEnvVarFeature">将 百宝箱 的安装目录添加到 PATH 环境变量，以便从任意位置启动。</String>
+  <String Id="InstallAppFeature">安装 百宝箱。</String>
+</WixLocalization>
