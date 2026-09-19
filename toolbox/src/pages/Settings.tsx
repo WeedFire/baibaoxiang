@@ -154,8 +154,14 @@ export function Settings({ onClose, onImported }: SettingsProps) {
   };
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog settings-dialog" onClick={(e) => e.stopPropagation()}>
+    // 只有“按下”就发生在遮罩上才关闭：在弹窗内按下、松手落在遮罩上时不会误关
+    <div
+      className="dialog-overlay"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="dialog settings-dialog">
         <div className="dialog-header">
           <h2>设置</h2>
           <button className="dialog-close" onClick={onClose} title="关闭">

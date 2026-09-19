@@ -333,8 +333,8 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
 
   if (loading) {
     return (
-      <div className="dialog-overlay" onClick={onClose}>
-        <div className="dialog dialog-loading" onClick={(e) => e.stopPropagation()}>
+      <div className="dialog-overlay">
+        <div className="dialog dialog-loading">
           <div className="loading-spinner" />
           <p>加载中...</p>
         </div>
@@ -343,8 +343,9 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
   }
 
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+    // 点击遮罩不再关闭：编辑过程中误点空白处会丢掉已填内容
+    <div className="dialog-overlay">
+      <div className="dialog">
         <div className="dialog-header">
           <h2>{mode === 'add' ? '添加应用' : '编辑应用'}</h2>
           <button className="dialog-close" onClick={onClose} title="关闭">
