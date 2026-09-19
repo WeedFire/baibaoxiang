@@ -48,6 +48,7 @@ pub fn run() {
             commands::update_cmd::get_update_state,
             commands::update_cmd::save_update_settings,
             commands::update_cmd::check_update,
+            commands::update_cmd::download_and_install_update,
             commands::update_cmd::set_ignored_update_version,
             commands::update_cmd::open_external_url,
         ])

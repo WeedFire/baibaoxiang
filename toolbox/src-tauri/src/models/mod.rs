@@ -209,7 +209,20 @@ pub struct UpdateAsset {
     pub name: Option<String>,
 }
 
-/// 更新源返回的清单（JSON），字段名尽量宽容，兼容常见的几种写法。
+/// Tauri `latest.json` 中单个平台的资产：下载地址 + ed25519 签名。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UpdatePlatformAsset {
+    /// ed25519 签名（base64 的 64 字节）。GitHub 风格清单没有这一项。
+    #[serde(default, alias = "sig")]
+    pub signature: Option<String>,
+    /// 该平台安装包地址
+    #[serde(alias = "download_url", alias = "browser_download_url")]
+    pub url: String,
+}
+
+/// 更新源返回的清单（JSON），字段名尽量宽容，兼容常见的几种写法：
+/// - Tauri updater 的 `latest.json`（`platforms` + `signature`，可自动下载安装）
+/// - GitHub Releases API / 自建 JSON（`url` 或 `assets`，只能下载后手动安装）
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UpdateManifest {
     /// 最新版本号，如 "1.0.2"（允许 "v1.0.2"）
@@ -233,6 +246,12 @@ pub struct UpdateManifest {
     /// 发布附件（GitHub Releases 会带这一项）
     #[serde(default)]
     pub assets: Option<Vec<UpdateAsset>>,
+    /// 发布时间（RFC3339，latest.json 会带）
+    #[serde(default, alias = "pubDate", alias = "published_at")]
+    pub pub_date: Option<String>,
+    /// 平台资产表：键为 `windows-x86_64` 等平台串（latest.json 会带）
+    #[serde(default)]
+    pub platforms: Option<std::collections::BTreeMap<String, UpdatePlatformAsset>>,
 }
 
 impl UpdateManifest {
@@ -261,6 +280,12 @@ pub struct UpdateSettings {
     pub enabled: bool,
     /// 更新源：http(s) 地址，或本地/局域网共享路径
     pub source_url: String,
+    /// ed25519 公钥（base64 的 32 字节）：填写后只安装验签通过的更新包
+    #[serde(default)]
+    pub pubkey: String,
+    /// 发现新版本后自动下载并安装（无需手动点按钮）
+    #[serde(default)]
+    pub auto_install: bool,
 }
 
 impl Default for UpdateSettings {
@@ -268,8 +293,48 @@ impl Default for UpdateSettings {
         Self {
             enabled: true,
             source_url: String::new(),
+            pubkey: String::new(),
+            auto_install: false,
         }
     }
+}
+
+/// 解析出的、适用于本机的更新资产
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ResolvedUpdateAsset {
+    pub url: String,
+    /// ed25519 签名（base64）；GitHub 风格清单为 None
+    pub signature: Option<String>,
+    /// 是否来自 `latest.json` 的平台表（true 表示按平台精确匹配）
+    pub platform_specific: bool,
+}
+
+/// 下载/安装进度，通过 `update://progress` 事件推给前端
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UpdateProgress {
+    /// preparing / downloading / verifying / installing / done
+    pub stage: String,
+    /// 已下载字节
+    pub downloaded: u64,
+    /// 总字节（未知时为 0）
+    pub total: u64,
+    /// 阶段说明（可选）
+    pub message: Option<String>,
+}
+
+/// 自动下载安装的结果
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UpdateInstallResult {
+    /// 是否已成功应用（便携版自替换成功，或安装程序已启动）
+    pub installed: bool,
+    /// 更新包在本地的路径
+    pub file_path: String,
+    /// 面向用户的说明
+    pub message: String,
+    /// 是否需要重启应用才能生效
+    pub need_restart: bool,
+    /// 是否已启动外部安装程序（此时应用会自动退出以让安装程序替换文件）
+    pub installer_started: bool,
 }
 
 /// 更新检查结果，直接返回给前端

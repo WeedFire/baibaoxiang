@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { api, type UpdateCheckResult, type UpdateState } from '../lib/tauri';
+import { stageLabel, useUpdateInstaller } from '../hooks/useUpdateInstaller';
 import './Settings.css';
 
 interface SettingsProps {
@@ -11,9 +12,18 @@ interface SettingsProps {
 const UPDATE_JSON_EXAMPLE = `{
   "version": "1.0.2",
   "notes": "本次更新的内容",
-  "url": "https://example.com/百宝箱-1.0.2.exe",
-  "mandatory": false
+  "mandatory": false,
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "ed25519 签名（base64）",
+      "url": "https://github.com/…/百宝箱_1.0.2_x64-setup.exe"
+    }
+  }
 }`;
+
+const UPDATE_MANIFEST_HINT =
+  'Tauri 风格的 latest.json：platforms 按平台给出安装包与签名，客户端自动挑选本机包并验签后安装。' +
+  '只写 url（GitHub Releases API 风格）时不校验签名，仅提供「手动下载」。';
 
 function formatTime(seconds: number): string {
   return new Date(seconds * 1000).toLocaleString();
@@ -51,12 +61,17 @@ export function Settings({ onClose, onImported }: SettingsProps) {
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [updateEnabled, setUpdateEnabled] = useState(true);
   const [updateSource, setUpdateSource] = useState('');
+  const [updatePubkey, setUpdatePubkey] = useState('');
+  const [updateAutoInstall, setUpdateAutoInstall] = useState(false);
   const [savingUpdate, setSavingUpdate] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<{
     type: 'success' | 'error';
     text: string;
   } | null>(null);
+  /** 最近一次检查结果（用于展示「下载并安装」按钮） */
+  const [lastCheck, setLastCheck] = useState<UpdateCheckResult | null>(null);
+  const installer = useUpdateInstaller();
 
   const loadUpdateState = useCallback(async () => {
     try {
@@ -64,6 +79,8 @@ export function Settings({ onClose, onImported }: SettingsProps) {
       setUpdateState(state);
       setUpdateEnabled(state.settings.enabled);
       setUpdateSource(state.settings.source_url);
+      setUpdatePubkey(state.settings.pubkey ?? '');
+      setUpdateAutoInstall(state.settings.auto_install ?? false);
     } catch (err) {
       console.error('读取更新设置失败:', err);
       setUpdateMessage({ type: 'error', text: `读取更新设置失败：${String(err)}` });
@@ -78,7 +95,7 @@ export function Settings({ onClose, onImported }: SettingsProps) {
     setSavingUpdate(true);
     setUpdateMessage(null);
     try {
-      await api.saveUpdateSettings(updateEnabled, updateSource);
+      await api.saveUpdateSettings(updateEnabled, updateSource, updatePubkey, updateAutoInstall);
       await loadUpdateState();
       setUpdateMessage({ type: 'success', text: '更新设置已保存' });
     } catch (err) {
@@ -88,11 +105,17 @@ export function Settings({ onClose, onImported }: SettingsProps) {
     }
   };
 
+  const handleInstall = async () => {
+    await installer.start();
+    await loadUpdateState();
+  };
+
   const handleCheckUpdate = async () => {
     setCheckingUpdate(true);
     setUpdateMessage(null);
     try {
       const result = await api.checkUpdate(true);
+      setLastCheck(result);
       setUpdateMessage(describeUpdateCheck(result));
       await loadUpdateState();
     } catch (err) {
@@ -206,13 +229,38 @@ export function Settings({ onClose, onImported }: SettingsProps) {
                 type="text"
                 value={updateSource}
                 onChange={(e) => setUpdateSource(e.target.value)}
-                placeholder="https://example.com/toolbox/update.json"
+                placeholder="https://github.com/…/releases/latest/download/latest.json"
               />
               <span className="settings-hint">
-                支持 http(s) 地址，也支持本地或局域网共享路径（如{' '}
+                推荐填 Tauri 风格的 latest.json（可按平台自动选择安装包并验签）；
+                也支持 GitHub Releases API 或本地/局域网共享路径（如{' '}
                 {'\\server\\share\\update.json'}）
               </span>
             </div>
+
+            <div className="settings-field">
+              <label htmlFor="update-pubkey">更新包公钥（可选）</label>
+              <input
+                id="update-pubkey"
+                type="text"
+                value={updatePubkey}
+                onChange={(e) => setUpdatePubkey(e.target.value)}
+                placeholder="ed25519 公钥（base64），留空则不校验签名"
+              />
+              <span className="settings-hint">
+                填写后只安装验签通过的更新包；清单必须提供对应 signature，
+                否则自动安装会被拒绝（与 Tauri updater 的公钥格式一致）
+              </span>
+            </div>
+
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={updateAutoInstall}
+                onChange={(e) => setUpdateAutoInstall(e.target.checked)}
+              />
+              <span>发现新版本后自动下载并安装（无需手动确认）</span>
+            </label>
 
             <div className="settings-actions">
               <button
@@ -229,7 +277,46 @@ export function Settings({ onClose, onImported }: SettingsProps) {
               >
                 {checkingUpdate ? '检查中...' : '立即检查'}
               </button>
+              {lastCheck?.has_update && (
+                <button
+                  className="settings-btn primary"
+                  onClick={() => void handleInstall()}
+                  disabled={installer.busy}
+                >
+                  {installer.busy
+                    ? `${stageLabel(installer.stage)}…`
+                    : `下载并安装 v${lastCheck.latest_version}`}
+                </button>
+              )}
             </div>
+
+            {installer.busy && (
+              <div className="settings-progress">
+                <div className="settings-progress-bar">
+                  <div
+                    className="settings-progress-fill"
+                    style={{
+                      width: `${installer.stage === 'downloading' ? installer.percent : 100}%`,
+                    }}
+                  />
+                </div>
+                <span className="settings-hint">
+                  {stageLabel(installer.stage)}
+                  {installer.stage === 'downloading' && installer.total > 0
+                    ? ` ${installer.percent}%`
+                    : ''}
+                </span>
+              </div>
+            )}
+
+            {installer.result && (
+              <div className={`settings-message ${installer.result.need_restart ? 'error' : 'success'}`}>
+                {installer.result.message}
+              </div>
+            )}
+            {installer.error && (
+              <div className="settings-message error">{installer.error}</div>
+            )}
 
             {updateState?.ignored_version && (
               <p className="settings-desc">
@@ -255,6 +342,7 @@ export function Settings({ onClose, onImported }: SettingsProps) {
                 版本号需高于当前版本才会提示；mandatory 为 true 时不提供「忽略/稍后」；
                 notes 为纯文本更新说明，可省略。
               </p>
+              <p className="settings-hint">{UPDATE_MANIFEST_HINT}</p>
             </details>
           </section>
 

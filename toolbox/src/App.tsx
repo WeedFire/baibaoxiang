@@ -19,6 +19,7 @@ export default function App() {
   const [editingAppId, setEditingAppId] = useState<string | undefined>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
+  const [autoInstall, setAutoInstall] = useState(false);
 
   /** 根据分组 id 加载应用；ALL_GROUPS_ID 代表展示全部 */
   const loadAppsFor = useCallback(async (groupId: string | null) => {
@@ -75,7 +76,15 @@ export default function App() {
       void (async () => {
         try {
           const result = await api.checkUpdate(false);
-          if (result.has_update) setUpdateInfo(result);
+          if (!result.has_update) return;
+          // 读取设置，决定是否需要「自动下载并安装」
+          try {
+            const state = await api.getUpdateState();
+            setAutoInstall(state.settings.auto_install);
+          } catch (err) {
+            console.warn('读取更新设置失败:', err);
+          }
+          setUpdateInfo(result);
         } catch (err) {
           console.error('检查更新失败:', err);
         }
@@ -128,6 +137,7 @@ export default function App() {
       {updateInfo && (
         <UpdateNotice
           info={updateInfo}
+          autoInstall={autoInstall}
           onDismiss={() => setUpdateInfo(null)}
           onIgnored={() => setUpdateInfo(null)}
         />

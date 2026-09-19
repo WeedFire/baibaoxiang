@@ -1,7 +1,11 @@
-use crate::models::{UpdateCheckResult, UpdateManifest, UpdateSettings, UpdateState};
-use crate::services::data_service;
+use crate::models::{
+    UpdateCheckResult, UpdateInstallResult, UpdateManifest, UpdateProgress, UpdateSettings,
+    UpdateState,
+};
+use crate::services::{data_service, update_install};
 use rusqlite::Connection;
 use std::cmp::Ordering;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// 单次请求超时时间，避免网络异常时界面长时间等待
@@ -15,10 +19,16 @@ pub const CHECK_INTERVAL_SECS: i64 = 6 * 60 * 60;
 pub const DEFAULT_SOURCE_URL: &str =
     "https://api.github.com/repos/WeedFire/baibaoxiang/releases/latest";
 
+/// 预置 ed25519 公钥（base64 的 32 字节）。留空表示不校验签名，
+/// 此时只允许「下载后手动安装」；在「设置 → 版本更新」里填写后即可自动安装。
+pub const DEFAULT_UPDATE_PUBKEY: &str = "";
+
 const ERR_404: &str = "更新源未找到（HTTP 404）：请检查地址，或该项目还没有发布正式版本";
 
 const KEY_ENABLED: &str = "update_check_enabled";
 const KEY_SOURCE: &str = "update_source_url";
+const KEY_PUBKEY: &str = "update_pubkey";
+const KEY_AUTO_INSTALL: &str = "update_auto_install";
 const KEY_IGNORED: &str = "update_ignored_version";
 const KEY_LATEST: &str = "update_latest_version";
 const KEY_NOTES: &str = "update_latest_notes";
@@ -44,12 +54,25 @@ pub fn load_settings(conn: &Connection) -> UpdateSettings {
             .flatten()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_SOURCE_URL.to_string()),
+        pubkey: data_service::get_setting(conn, KEY_PUBKEY)
+            .ok()
+            .flatten()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_UPDATE_PUBKEY.to_string()),
+        auto_install: data_service::get_setting_bool(conn, KEY_AUTO_INSTALL, false),
     }
 }
 
 pub fn save_settings(conn: &Connection, settings: &UpdateSettings) -> Result<(), String> {
     data_service::set_setting(conn, KEY_ENABLED, if settings.enabled { "1" } else { "0" })?;
-    data_service::set_setting(conn, KEY_SOURCE, settings.source_url.trim())
+    data_service::set_setting(conn, KEY_SOURCE, settings.source_url.trim())?;
+    data_service::set_setting(conn, KEY_PUBKEY, settings.pubkey.trim())?;
+    data_service::set_setting(
+        conn,
+        KEY_AUTO_INSTALL,
+        if settings.auto_install { "1" } else { "0" },
+    )
 }
 
 pub fn ignored_version(conn: &Connection) -> Option<String> {
@@ -199,14 +222,7 @@ pub fn fetch_manifest(source: &str, user_agent: &str) -> Result<UpdateManifest, 
 fn fetch_over_http(url: &str, user_agent: &str) -> Result<String, String> {
     // Windows 走系统 SChannel：必须显式指定 provider，
     // ureq 默认用 rustls，未启用该 feature 时请求 https 会直接 panic。
-    let tls_config = ureq::tls::TlsConfig::builder()
-        .provider(ureq::tls::TlsProvider::NativeTls)
-        .build();
-    let config = ureq::config::Config::builder()
-        .timeout_global(Some(TIMEOUT))
-        .tls_config(tls_config)
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
+    let agent = update_install::build_agent(TIMEOUT);
 
     let response = agent
         .get(url)
@@ -329,6 +345,121 @@ pub fn check_update(
     }
 }
 
+// ---- 自动下载并安装 ----
+
+/// 报告一个进度阶段。
+fn report(progress: &mut dyn FnMut(UpdateProgress), stage: &str, downloaded: u64, total: u64, message: Option<String>) {
+    progress(UpdateProgress {
+        stage: stage.to_string(),
+        downloaded,
+        total,
+        message,
+    });
+}
+
+/// 自动下载并安装更新。
+///
+/// 流程：重新拉取清单 → 匹配本机平台资产 → 下载（带进度）→ 验签 →
+/// 交给安装器（`.msi`/`.exe`）或直接原地替换（便携版）。
+///
+/// 安全策略：配置了公钥时，**必须**有签名且验签通过才允许安装。
+pub fn install_update(
+    conn: &Connection,
+    current_version: &str,
+    progress: &mut dyn FnMut(UpdateProgress),
+) -> Result<UpdateInstallResult, String> {
+    let settings = load_settings(conn);
+    let user_agent = format!("baibaoxiang/{}", current_version);
+    let platform = update_install::platform_key();
+
+    report(progress, "preparing", 0, 0, Some("正在获取更新清单…".to_string()));
+    let manifest = fetch_manifest(&settings.source_url, &user_agent)?;
+    let asset = update_install::resolve_asset(&manifest, &platform).ok_or_else(|| {
+        format!(
+            "更新清单中没有适用于当前平台（{}）的安装包，请到发布页手动下载",
+            platform
+        )
+    })?;
+
+    let file_name = update_install::filename_from_url(&asset.url).unwrap_or_else(|| {
+        format!("baibaoxiang-{}.bin", manifest.version.trim().trim_start_matches(['v', 'V']))
+    });
+    let dest = update_install::update_dir().join(&file_name);
+
+    // 1) 下载
+    report(
+        progress,
+        "downloading",
+        0,
+        0,
+        Some(format!("正在下载 {}", file_name)),
+    );
+    let mut last_done = 0u64;
+    let mut last_total = 0u64;
+    update_install::download(&asset.url, &dest, &user_agent, &mut |done, total| {
+        last_done = done;
+        last_total = total.unwrap_or(0);
+        report(progress, "downloading", done, last_total, None);
+    })?;
+    report(progress, "downloading", last_done, last_total, None);
+
+    // 2) 验签（配置了公钥就强制校验）
+    let pubkey = settings.pubkey.trim();
+    if !pubkey.is_empty() {
+        report(progress, "verifying", last_done, last_total, Some("正在校验更新包签名…".to_string()));
+        let signature = asset.signature.as_deref().ok_or_else(|| {
+            "更新清单没有提供签名，出于安全考虑已拒绝自动安装（可在设置中清空公钥或改用带签名的 latest.json）"
+                .to_string()
+        })?;
+        let bytes = std::fs::read(&dest).map_err(|e| format!("读取更新包失败: {}", e))?;
+        if !update_install::verify_signature(pubkey, &bytes, signature)? {
+            return Err("更新包签名校验失败，文件可能已被篡改，已拒绝安装".to_string());
+        }
+    }
+
+    // 3) 安装
+    report(progress, "installing", last_done, last_total, Some("正在启动安装…".to_string()));
+    let current_exe = std::env::current_exe().map_err(|e| format!("无法获取当前程序路径: {}", e))?;
+    let plan = update_install::installer_plan(&dest, &current_exe)?;
+
+    let result = match plan.kind {
+        update_install::InstallKind::Portable => {
+            update_install::replace_portable(&current_exe, &dest)?;
+            UpdateInstallResult {
+                installed: true,
+                file_path: dest.to_string_lossy().to_string(),
+                message: format!(
+                    "新版本 v{} 已就位，重启应用后生效",
+                    manifest.version.trim()
+                ),
+                need_restart: true,
+                installer_started: false,
+            }
+        }
+        _ => {
+            update_install::run_installer(&plan)?;
+            UpdateInstallResult {
+                installed: true,
+                file_path: dest.to_string_lossy().to_string(),
+                message: format!(
+                    "已启动安装程序，应用即将退出并完成更新到 v{}",
+                    manifest.version.trim()
+                ),
+                need_restart: false,
+                installer_started: true,
+            }
+        }
+    };
+
+    report(progress, "done", last_done, last_total, Some(result.message.clone()));
+    Ok(result)
+}
+
+/// 更新包下载目录（供命令行/日志使用）。
+pub fn download_dir() -> PathBuf {
+    update_install::update_dir()
+}
+
 fn build_result(
     status: &str,
     settings: &UpdateSettings,
@@ -365,6 +496,7 @@ fn build_result(
 mod tests {
     use super::*;
     use crate::db::init_schema;
+    use base64::Engine as _;
 
     fn db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -489,6 +621,7 @@ mod tests {
             &UpdateSettings {
                 enabled: true,
                 source_url: source,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -511,6 +644,7 @@ mod tests {
             &UpdateSettings {
                 enabled: true,
                 source_url: source,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -530,6 +664,7 @@ mod tests {
             &UpdateSettings {
                 enabled: true,
                 source_url: source,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -541,6 +676,7 @@ mod tests {
             &UpdateSettings {
                 enabled: true,
                 source_url: "Z:/__no_such_dir__/update.json".to_string(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -566,6 +702,7 @@ mod tests {
             &UpdateSettings {
                 enabled: true,
                 source_url: source,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -586,6 +723,7 @@ mod tests {
             &UpdateSettings {
                 enabled: true,
                 source_url: source,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -607,6 +745,7 @@ mod tests {
             &UpdateSettings {
                 enabled: false,
                 source_url: DEFAULT_SOURCE_URL.to_string(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -625,6 +764,7 @@ mod tests {
             &UpdateSettings {
                 enabled: true,
                 source_url: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -634,6 +774,192 @@ mod tests {
         let state = load_state(&conn, "1.0.1");
         assert_eq!(state.current_version, "1.0.1");
         assert!(state.settings.enabled);
+    }
+
+    // ---- 自动下载安装 ----
+
+    /// 确定性密钥对（固定种子），测试不依赖随机数生成器。
+    fn keypair() -> (String, ed25519_dalek::SigningKey) {
+        use ed25519_dalek::SigningKey;
+        let signing = SigningKey::from_bytes(&[42u8; 32]);
+        let pubkey = base64::engine::general_purpose::STANDARD
+            .encode(signing.verifying_key().to_bytes());
+        (pubkey, signing)
+    }
+
+    fn sign(signing: &ed25519_dalek::SigningKey, data: &[u8]) -> String {
+        use ed25519_dalek::Signer;
+        base64::engine::general_purpose::STANDARD.encode(signing.sign(data).to_bytes())
+    }
+
+    /// 起一个一次性本地 HTTP 服务，返回端口与句柄。
+    fn serve_bytes(body: Vec<u8>) -> (u16, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        (port, handle)
+    }
+
+    /// 构造「本机平台 → 指定包地址」的 latest.json 清单文件。
+    fn platform_source(
+        dir: &tempfile::TempDir,
+        package_name: &str,
+        package_url: &str,
+        signature: Option<&str>,
+    ) -> String {
+        let mut asset = serde_json::json!({ "url": package_url });
+        if let Some(sig) = signature {
+            asset["signature"] = serde_json::Value::String(sig.to_string());
+        }
+        let manifest = serde_json::json!({
+            "version": "9.9.9",
+            "notes": "测试更新",
+            "platforms": { update_install::platform_key(): asset }
+        });
+        let path = dir.path().join(format!("latest-{}.json", package_name));
+        std::fs::write(&path, manifest.to_string()).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    fn enable_auto_install(conn: &Connection, source: String, pubkey: String) {
+        save_settings(
+            conn,
+            &UpdateSettings {
+                enabled: true,
+                source_url: source,
+                pubkey,
+                auto_install: true,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn settings_roundtrip_includes_pubkey_and_auto_install() {
+        let conn = db();
+        let settings = UpdateSettings {
+            enabled: false,
+            source_url: "https://example.com/latest.json".to_string(),
+            pubkey: "PUBKEY==".to_string(),
+            auto_install: true,
+        };
+        save_settings(&conn, &settings).unwrap();
+
+        let loaded = load_settings(&conn);
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.source_url, "https://example.com/latest.json");
+        assert_eq!(loaded.pubkey, "PUBKEY==");
+        assert!(loaded.auto_install);
+        // 默认值：未配置公钥时为空、自动安装关闭
+        let empty = db();
+        assert_eq!(load_settings(&empty).pubkey, DEFAULT_UPDATE_PUBKEY);
+        assert!(!load_settings(&empty).auto_install);
+    }
+
+    /// 完整链路：拉清单 → 下载 → 验签 → 由于包格式不支持而明确报错。
+    #[test]
+    fn install_downloads_and_verifies_before_installation() {
+        let conn = db();
+        let payload: Vec<u8> = (0..64u8).collect();
+        let (port, server) = serve_bytes(payload.clone());
+        let (pubkey, signing) = keypair();
+        let dir = tempfile::tempdir().unwrap();
+        let source = platform_source(
+            &dir,
+            "update.zip",
+            &format!("http://127.0.0.1:{}/update.zip", port),
+            Some(&sign(&signing, &payload)),
+        );
+        enable_auto_install(&conn, source, pubkey);
+
+        let mut stages: Vec<String> = Vec::new();
+        let error = install_update(&conn, "1.0.0", &mut |p| stages.push(p.stage)).unwrap_err();
+
+        assert!(error.contains("暂不支持自动安装"), "错误应说明包格式不支持：{}", error);
+        assert!(stages.contains(&"downloading".to_string()), "阶段：{:?}", stages);
+        assert!(stages.contains(&"verifying".to_string()), "阶段：{:?}", stages);
+
+        let _ = std::fs::remove_file(download_dir().join("update.zip"));
+        let _ = server.join();
+    }
+
+    #[test]
+    fn install_rejects_tampered_signature() {
+        let conn = db();
+        let payload = b"real payload".to_vec();
+        let (port, server) = serve_bytes(payload.clone());
+        let (pubkey, signing) = keypair();
+        let dir = tempfile::tempdir().unwrap();
+        // 用另一段数据的签名冒充
+        let source = platform_source(
+            &dir,
+            "tampered.zip",
+            &format!("http://127.0.0.1:{}/tampered.zip", port),
+            Some(&sign(&signing, b"another payload")),
+        );
+        enable_auto_install(&conn, source, pubkey);
+
+        let error = install_update(&conn, "1.0.0", &mut |_| {}).unwrap_err();
+        assert!(error.contains("签名校验失败"), "{}", error);
+        let _ = std::fs::remove_file(download_dir().join("tampered.zip"));
+        let _ = server.join();
+    }
+
+    #[test]
+    fn install_refuses_unsigned_package_when_pubkey_configured() {
+        let conn = db();
+        let payload = b"unsigned".to_vec();
+        let (port, server) = serve_bytes(payload.clone());
+        let (pubkey, _) = keypair();
+        let dir = tempfile::tempdir().unwrap();
+        let source = platform_source(
+            &dir,
+            "unsigned.zip",
+            &format!("http://127.0.0.1:{}/unsigned.zip", port),
+            None,
+        );
+        enable_auto_install(&conn, source, pubkey);
+
+        let error = install_update(&conn, "1.0.0", &mut |_| {}).unwrap_err();
+        assert!(error.contains("没有提供签名"), "{}", error);
+        let _ = std::fs::remove_file(download_dir().join("unsigned.zip"));
+        let _ = server.join();
+    }
+
+    #[test]
+    fn install_reports_when_no_asset_for_current_platform() {
+        let conn = db();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("latest.json");
+        std::fs::write(
+            &path,
+            r#"{ "version": "9.9.9", "platforms": { "plan9-sparc": { "url": "https://example.com/x" } } }"#,
+        )
+        .unwrap();
+        enable_auto_install(
+            &conn,
+            path.to_string_lossy().to_string(),
+            String::new(),
+        );
+
+        let error = install_update(&conn, "1.0.0", &mut |_| {}).unwrap_err();
+        assert!(error.contains("当前平台"), "{}", error);
+        assert!(error.contains(&update_install::platform_key()), "{}", error);
     }
 
     /// 手动验证真实更新源：`cargo test --lib -- --ignored --nocapture`

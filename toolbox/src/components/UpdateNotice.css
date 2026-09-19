@@ -97,3 +97,52 @@
   font-size: 12px;
   color: #c0392b;
 }
+
+/* 下载/安装进度 */
+.update-progress {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.update-progress-bar {
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 3px;
+  background: #D8EBDC;
+  overflow: hidden;
+}
+
+.update-progress-fill {
+  height: 100%;
+  background: #4a9eff;
+  transition: width 0.2s ease;
+}
+
+.update-progress-text {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #46564A;
+  white-space: nowrap;
+}
+
+/* 安装结果 */
+.update-notice-result {
+  margin-top: 8px;
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.update-notice-result.ok {
+  background: #E4F5E7;
+  color: #256029;
+  border: 1px solid #A9D6AE;
+}
+
+.update-notice-result.warn {
+  background: #FFF6E0;
+  color: #8A5B00;
+  border: 1px solid #F0D18A;
+}

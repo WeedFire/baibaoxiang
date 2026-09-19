@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 
 /** 与 Rust `models::AppItem` 一一对应 */
 /** 启动方式：与 Rust `LaunchKind` 一一对应 */
@@ -75,6 +76,30 @@ export interface UpdateSettings {
   enabled: boolean;
   /** 更新源：http(s) 地址或本地/共享路径 */
   source_url: string;
+  /** ed25519 公钥（base64 的 32 字节），填写后只安装验签通过的更新包 */
+  pubkey: string;
+  /** 发现新版本后自动下载并安装 */
+  auto_install: boolean;
+}
+
+/** 下载/安装进度（后端 `update://progress` 事件的载荷） */
+export interface UpdateProgress {
+  /** preparing / downloading / verifying / installing / done */
+  stage: string;
+  downloaded: number;
+  total: number;
+  message: string | null;
+}
+
+/** 自动下载安装的结果 */
+export interface UpdateInstallResult {
+  installed: boolean;
+  file_path: string;
+  message: string;
+  /** 需要重启应用后生效（便携版自替换） */
+  need_restart: boolean;
+  /** 已启动外部安装程序，应用随后自动退出 */
+  installer_started: boolean;
 }
 
 export interface UpdateCheckResult {
@@ -188,12 +213,27 @@ export const api = {
 
   // ---- 版本更新 ----
   getUpdateState: () => invoke<UpdateState>('get_update_state'),
-  saveUpdateSettings: (enabled: boolean, sourceUrl: string) =>
-    invoke<void>('save_update_settings', { enabled, sourceUrl }),
+  saveUpdateSettings: (
+    enabled: boolean,
+    sourceUrl: string,
+    pubkey: string,
+    autoInstall: boolean,
+  ) => invoke<void>('save_update_settings', { enabled, sourceUrl, pubkey, autoInstall }),
   /** force = false 时遵守自动检查间隔，直接返回上次结果 */
   checkUpdate: (force = false) =>
     invoke<UpdateCheckResult>('check_update', { force }),
+  /** 下载 → 验签 → 安装（进度通过 `update://progress` 事件推送） */
+  downloadAndInstallUpdate: () =>
+    invoke<UpdateInstallResult>('download_and_install_update'),
   setIgnoredUpdateVersion: (version: string | null) =>
     invoke<void>('set_ignored_update_version', { version }),
   openExternalUrl: (url: string) => invoke<void>('open_external_url', { url }),
 };
+
+/** 订阅更新包下载/安装进度，返回取消订阅函数 */
+export async function listenUpdateProgress(
+  handler: (progress: UpdateProgress) => void,
+): Promise<UnlistenFn> {
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen<UpdateProgress>('update://progress', (event) => handler(event.payload));
+}
