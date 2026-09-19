@@ -154,13 +154,8 @@ export function Settings({ onClose, onImported }: SettingsProps) {
   };
 
   return (
-    // 只有“按下”就发生在遮罩上才关闭：在弹窗内按下、松手落在遮罩上时不会误关
-    <div
-      className="dialog-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
+    // 与 AppDialog 一致：点击遮罩不关闭弹窗，避免误点空白丢失已填内容
+    <div className="dialog-overlay">
       <div className="dialog settings-dialog">
         <div className="dialog-header">
           <h2>设置</h2>
