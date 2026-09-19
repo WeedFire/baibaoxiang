@@ -413,6 +413,38 @@ class TestScanEngine:
             assert len(items) <= 1
 
 
+# ==================== 白名单匹配语义 ====================
+# 回归背景：白名单原先只做「目录前缀」匹配，用户填文件名（如 数据v1.pdf）
+# 会被当成相对路径 → 永远匹配不到 → 文件照删。现支持三种写法。
+class TestWhitelistMatching:
+    def test_filename_entry_protects_matching_file(self):
+        """用户场景：填「数据v1.pdf」必须保护同名文件（含后缀精确匹配）。"""
+        assert ScanEngine._in_whitelist(
+            r"D:\temp\test_data\数据v1.pdf", ["数据v1.pdf"]) is True
+        assert ScanEngine._in_whitelist(
+            r"D:\temp\test_data\数据v1.txt", ["数据v1.pdf"]) is False
+
+    def test_filename_match_is_case_insensitive(self):
+        assert ScanEngine._in_whitelist(r"D:\t\A.PDF", ["a.pdf"]) is True
+
+    def test_wildcard_entry_matches_extension(self):
+        assert ScanEngine._in_whitelist(r"D:\t\数据v1.pdf", ["*.pdf"]) is True
+        assert ScanEngine._in_whitelist(r"D:\t\数据v1.txt", ["*.pdf"]) is False
+        assert ScanEngine._in_whitelist(r"D:\t\报告v1.docx", ["报告*"]) is True
+
+    def test_directory_entry_protects_subtree(self):
+        assert ScanEngine._in_whitelist(r"D:\资料\sub\a.txt", [r"D:\资料"]) is True
+        assert ScanEngine._in_whitelist(r"D:\资料", [r"D:\资料"]) is True
+
+    def test_directory_prefix_respects_boundary(self):
+        """D:\\资料 不应误保护同前缀的 D:\\资料2。"""
+        assert ScanEngine._in_whitelist(r"D:\资料2\a.txt", [r"D:\资料"]) is False
+
+    def test_trailing_separator_and_blank_entries(self):
+        assert ScanEngine._in_whitelist(r"D:\资料\a.txt", ["D:\\资料\\"]) is True
+        assert ScanEngine._in_whitelist(r"D:\资料\a.txt", ["", "   "]) is False
+
+
 # ==================== 删除引擎 ====================
 class TestDeleteEngine:
     def test_delete_moves_to_trash(self):
@@ -447,6 +479,30 @@ class TestDeleteEngine:
                 log_cb=lambda lvl, msg: None,
             )
             assert os.path.exists(target)  # 白名单保护
+
+    def test_whitelist_filename_protects_file(self):
+        """白名单填文件名（带后缀）时，删除阶段也必须跳过。
+
+        用户场景：whitelist = ["数据v1.pdf"]，该文件必须完好无损。"""
+        d = tempfile.mkdtemp(prefix="fj_wl_test_", dir=os.path.expanduser("~"))
+        try:
+            target = os.path.join(d, "数据v1.pdf")
+            with open(target, "w", encoding="utf-8") as f:
+                f.write("data")
+            eng = DeleteEngine()
+            recs = []
+            report = eng.delete_items(
+                items=[{"path": target, "is_dir": False, "size": 4}],
+                whitelist=["数据v1.pdf"],
+                progress_cb=lambda dn, tot: None,
+                item_cb=recs.append,
+                log_cb=lambda lvl, msg: None,
+            )
+            assert report["success"] == 0 and report["skipped"] == 1, report
+            assert recs and recs[0]["error"] == "白名单保护", recs
+            assert os.path.exists(target)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_missing_path_skipped(self):
         with tempfile.TemporaryDirectory() as d:

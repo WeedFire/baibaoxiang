@@ -16,6 +16,7 @@ import sys
 import json
 import re
 import time
+import fnmatch
 import traceback
 import threading
 from datetime import datetime
@@ -500,11 +501,38 @@ class ScanEngine:
 
     @staticmethod
     def _in_whitelist(path, whitelist):
+        """白名单匹配：命中即受保护，扫描与删除都不会动它。
+
+        条目支持三种写法（大小写不敏感，Windows）：
+          1) 目录（含路径分隔符或盘符，如 ``D:\\资料``）：保护该目录及其全部子项；
+          2) 通配符（含 ``*`` 或 ``?``，如 ``*.pdf`` / ``报告*``）：按文件名匹配；
+          3) 文件名（如 ``数据v1.pdf``，含后缀）：与文件名精确匹配。
+        旧版只支持第 1 种，填文件名会静默失效（文件照删），故补上 2/3 两种。
+        """
         if not whitelist:
             return False
-        ap = normalize_path(path)
+        ap = normalize_path(path)              # 已 normcase（小写 + 反斜杠）
+        base = os.path.basename(ap)
         for w in whitelist:
-            if w and ap.startswith(normalize_path(w)):
+            w = (w or "").strip().strip('"').strip()
+            if not w:
+                continue
+            # 通配符：按文件名匹配（fnmatch 在 Windows 上本身不区分大小写）
+            if "*" in w or "?" in w:
+                if fnmatch.fnmatch(base, w):
+                    return True
+                continue
+            # 纯文件名（无分隔符、无盘符）：按文件名精确匹配
+            is_dir_like = ("\\" in w or "/" in w
+                           or (len(w) > 1 and w[1] == ":"))
+            if not is_dir_like:
+                if base == os.path.normcase(w):
+                    return True
+                continue
+            # 目录/路径：前缀匹配，且要求目录边界（D:\资料 不保护 D:\资料2）
+            wp = normalize_path(w)
+            if ap == wp or ap.startswith(
+                    wp if wp.endswith(os.sep) else wp + os.sep):
                 return True
         return False
 
@@ -1034,8 +1062,16 @@ class FileJanitorApp(QMainWindow):
         self.exclude_edit.editingFinished.connect(self.on_settings_changed)
         f2_layout.addWidget(self.exclude_edit)
 
-        f2_layout.addWidget(QLabel("白名单（永不被删，逗号分隔）："))
+        wl_tip = QLabel(
+            "白名单（永不被删，逗号分隔，支持三种写法）：\n"
+            "    · 目录：D:\\资料       → 保护该目录及其全部子项\n"
+            "    · 文件名：数据v1.pdf   → 精确保护同名文件（需带后缀）\n"
+            "    · 通配符：*.pdf、报告* → 按文件名匹配（不分大小写）")
+        wl_tip.setWordWrap(True)
+        f2_layout.addWidget(wl_tip)
         self.whitelist_edit = QLineEdit(",".join(self.whitelist))
+        self.whitelist_edit.setPlaceholderText(
+            "例如：D:\\资料, 数据v1.pdf, *.pdf")
         self.whitelist_edit.editingFinished.connect(self.on_settings_changed)
         f2_layout.addWidget(self.whitelist_edit)
         layout.addWidget(f2)
@@ -1400,6 +1436,9 @@ class FileJanitorApp(QMainWindow):
         self.progress.setRange(0, 0)  # 忙碌模式
         self.log("INFO", f"开始扫描，目标路径 {len(self.target_paths)} 个，模式 "
                          f"{MATCH_MODE_LABELS.get(self.match_mode)}/{DELETE_TYPE_LABELS.get(self.delete_type)}")
+        if self.whitelist:
+            self.log("INFO", f"白名单保护 {len(self.whitelist)} 条："
+                             + "、".join(self.whitelist))
 
         self.scan_worker = ScanWorker(
             self.scan_engine, self.excel_names, self.target_paths,
@@ -1753,6 +1792,10 @@ class FileJanitorApp(QMainWindow):
             "3. 选择删除类型/匹配模式，点击「扫描预览」。\n"
             "4. 在右侧结果中勾选要删除的项（默认全选）。\n"
             "5. 点击「执行删除」，确认后移至回收站（可恢复）。\n\n"
+            "白名单写法（逗号分隔，命中即永不删除）：\n"
+            "   · 目录：D:\\资料（保护该目录及其子项）\n"
+            "   · 文件名：数据v1.pdf（需带后缀，按文件名精确匹配）\n"
+            "   · 通配符：*.pdf、报告*（按文件名匹配，不分大小写）\n\n"
             "安全机制：系统目录保护、白名单、二次确认、回收站恢复、全量日志。"
         )
         QMessageBox.information(self, "帮助", txt)
