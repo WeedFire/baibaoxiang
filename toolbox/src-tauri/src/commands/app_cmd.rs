@@ -33,6 +33,12 @@ pub fn get_apps_by_group(app: AppHandle, group_id: String) -> Result<Vec<AppItem
 }
 
 #[tauri::command]
+pub fn get_all_apps(app: AppHandle) -> Result<Vec<AppItem>, String> {
+    let conn = db::get_connection(&app)?;
+    data_service::get_all_apps(&conn)
+}
+
+#[tauri::command]
 pub fn get_app_by_id(app: AppHandle, app_id: String) -> Result<AppItem, String> {
     let conn = db::get_connection(&app)?;
     data_service::get_app_by_id(&conn, &app_id)

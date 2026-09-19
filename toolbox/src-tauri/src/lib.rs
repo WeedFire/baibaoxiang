@@ -21,6 +21,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_cmd::get_apps_by_group,
+            commands::app_cmd::get_all_apps,
             commands::app_cmd::get_app_by_id,
             commands::app_cmd::add_app,
             commands::app_cmd::update_app,

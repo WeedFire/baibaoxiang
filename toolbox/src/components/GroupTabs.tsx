@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api } from '../lib/tauri';
+import { api, ALL_GROUPS_ID } from '../lib/tauri';
 import { useAppStore } from '../store/appStore';
 import './GroupTabs.css';
 
@@ -68,6 +68,15 @@ export function GroupTabs({ onCreateGroup }: GroupTabsProps) {
   return (
     <div className="group-tabs">
       <div className="group-tabs-list">
+        {/* “全部”虚拟分组：默认展示所有已添加的应用，不可删除/不可拖动 */}
+        <button
+          key={ALL_GROUPS_ID}
+          className={`group-tab group-tab-all ${currentGroupId === ALL_GROUPS_ID ? 'active' : ''}`}
+          onClick={() => setCurrentGroupId(ALL_GROUPS_ID)}
+        >
+          全部
+        </button>
+
         {groups.map((group) => (
           <button
             key={group.id}

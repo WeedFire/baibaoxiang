@@ -39,6 +39,9 @@ export interface AppGroup {
   is_default: boolean;
 }
 
+/** 特殊分组 id：代表“全部”，展示所有已添加的应用（非数据库真实分组） */
+export const ALL_GROUPS_ID = '__all__';
+
 export interface LayoutInfo {
   app_id: string;
   pos_x: number;
@@ -147,6 +150,7 @@ export const api = {
   // ---- 应用 ----
   getAppsByGroup: (groupId: string) =>
     invoke<AppItem[]>('get_apps_by_group', { groupId }),
+  getAllApps: () => invoke<AppItem[]>('get_all_apps'),
   getAppById: (appId: string) => invoke<AppItem>('get_app_by_id', { appId }),
   addApp: (req: AddAppRequest) => invoke<AppItem>('add_app', { req }),
   updateApp: (req: UpdateAppRequest) => invoke<AppItem>('update_app', { req }),

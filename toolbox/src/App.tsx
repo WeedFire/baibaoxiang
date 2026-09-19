@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, type UpdateCheckResult } from './lib/tauri';
+import { api, ALL_GROUPS_ID, type UpdateCheckResult } from './lib/tauri';
 import { useAppStore } from './store/appStore';
 import { Toolbar } from './components/Toolbar';
 import { GroupTabs } from './components/GroupTabs';
@@ -11,8 +11,7 @@ import { Settings } from './pages/Settings';
 import './App.css';
 
 export default function App() {
-  const { activeTab, setGroups, setCurrentGroupId, currentGroupId, setApps } =
-    useAppStore();
+  const { activeTab, currentGroupId, setApps } = useAppStore();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [appDialogOpen, setAppDialogOpen] = useState(false);
@@ -21,31 +20,54 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
 
+  /** 根据分组 id 加载应用；ALL_GROUPS_ID 代表展示全部 */
+  const loadAppsFor = useCallback(async (groupId: string | null) => {
+    try {
+      const apps =
+        !groupId || groupId === ALL_GROUPS_ID
+          ? await api.getAllApps()
+          : await api.getAppsByGroup(groupId);
+      setApps(apps);
+      setError(null);
+    } catch (err) {
+      console.error('Failed to load apps:', err);
+      setError(String(err));
+    }
+  }, [setApps]);
+
+  /** 全量刷新：重新读取分组、决定默认分组（全部），并加载应用 */
   const loadData = useCallback(async () => {
     try {
+      const { setGroups, setCurrentGroupId, currentGroupId: prevId } =
+        useAppStore.getState();
       const groups = await api.getGroups();
       setGroups(groups);
 
-      // 首次加载或当前分组已被删除时，自动选中第一个分组
-      let groupId = currentGroupId;
-      if (!groupId || !groups.some((g) => g.id === groupId)) {
-        groupId = groups[0]?.id ?? null;
-        if (groupId) setCurrentGroupId(groupId);
+      // 默认选中“全部”；若之前已选中某真实分组则保持不变
+      let groupId = prevId;
+      if (!groupId || (groupId !== ALL_GROUPS_ID && !groups.some((g) => g.id === groupId))) {
+        groupId = ALL_GROUPS_ID;
+        setCurrentGroupId(ALL_GROUPS_ID);
       }
 
-      setApps(groupId ? await api.getAppsByGroup(groupId) : []);
-      setError(null);
+      await loadAppsFor(groupId);
     } catch (err) {
       console.error('Failed to load data:', err);
       setError(String(err));
     } finally {
       setLoading(false);
     }
-  }, [currentGroupId, setGroups, setCurrentGroupId, setApps]);
+  }, [loadAppsFor]);
 
+  // 首次加载
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  // 切换分组时重新加载应用（修复此前分组切换不刷新列表的问题）
+  useEffect(() => {
+    void loadAppsFor(currentGroupId);
+  }, [currentGroupId, loadAppsFor]);
 
   // 启动后自动检查更新：后端按间隔复用上次结果，不会每次启动都联网
   useEffect(() => {

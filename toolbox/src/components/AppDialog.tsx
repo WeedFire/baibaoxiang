@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
   api,
+  ALL_GROUPS_ID,
   defaultNameFromPath,
   iconUrl,
   looksLikePythonScript,
@@ -77,9 +78,14 @@ function sourceLabel(source: string): string {
 
 export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
   const { groups, currentGroupId } = useAppStore();
+  // “全部”视图下没有真实分组，新建应用默认归入第一个真实分组
+  const defaultGroupId =
+    currentGroupId && currentGroupId !== ALL_GROUPS_ID && groups.some((g) => g.id === currentGroupId)
+      ? currentGroupId
+      : groups[0]?.id ?? 'default';
   const [form, setForm] = useState<FormData>({
     ...defaultForm,
-    group_id: currentGroupId || 'default',
+    group_id: defaultGroupId,
   });
   const [errors, setErrors] = useState<Partial<Record<keyof FormData, string>>>({});
   const [formError, setFormError] = useState<string | null>(null);
