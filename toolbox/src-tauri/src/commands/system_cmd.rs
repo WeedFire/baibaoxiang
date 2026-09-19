@@ -4,6 +4,7 @@ use crate::services::{data_service, icon_service, process_launcher, python_detec
 use crate::utils;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tauri::AppHandle;
 
 #[derive(Serialize, Deserialize)]
@@ -11,6 +12,9 @@ pub struct ConfigExport {
     pub version: u32,
     pub groups: Vec<AppGroup>,
     pub apps: Vec<AppItem>,
+    /// app_id -> base64 编码的图标 PNG；导入时写进本机图标缓存目录，实现「换机器也有图标」
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub icons: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -146,10 +150,23 @@ pub fn inspect_app_path(path: String) -> PathInspection {
 pub fn build_export(conn: &rusqlite::Connection) -> Result<ConfigExport, String> {
     let groups = data_service::get_groups(conn)?;
     let apps = data_service::get_all_apps(conn)?;
+
+    // 图标一并内嵌，跨机器导入后无需重新提取（读不出内容的直接跳过，不阻断导出）
+    let mut icons = HashMap::new();
+    for item in &apps {
+        let Some(path) = item.icon_path.as_deref() else {
+            continue;
+        };
+        if let Some(bytes) = icon_service::read_icon_bytes(path) {
+            icons.insert(item.id.clone(), utils::base64::encode(&bytes));
+        }
+    }
+
     Ok(ConfigExport {
         version: 1,
         groups,
         apps,
+        icons,
     })
 }
 
@@ -208,6 +225,9 @@ pub fn import_config(app: AppHandle, config: ConfigExport) -> Result<usize, Stri
     .map_err(|e| e.to_string())?;
 
     let mut imported = 0usize;
+    // 配置里没带图标、本机也找不到图标的记录，导入完成后按可执行文件重新提取
+    let mut need_extract: Vec<String> = Vec::new();
+
     for item in &config.apps {
         let group_exists: bool = tx
             .query_row(
@@ -221,6 +241,8 @@ pub fn import_config(app: AppHandle, config: ConfigExport) -> Result<usize, Stri
         } else {
             "default".to_string()
         };
+
+        let icon_path = import_icon_path(&app, item, &config.icons, &mut need_extract);
 
         tx.execute(
             "INSERT OR REPLACE INTO app_items (id, group_id, name, executable_path, arguments,
@@ -241,7 +263,7 @@ pub fn import_config(app: AppHandle, config: ConfigExport) -> Result<usize, Stri
                 item.show_console as i32,
                 item.run_as_admin as i32,
                 item.allow_multiple_instances as i32,
-                item.icon_path.as_deref().unwrap_or(""),
+                icon_path,
                 item.sort_order,
                 item.created_at,
                 item.updated_at,
@@ -253,7 +275,48 @@ pub fn import_config(app: AppHandle, config: ConfigExport) -> Result<usize, Stri
     }
 
     tx.commit().map_err(|e| e.to_string())?;
+
+    // 事务提交后再提取图标：提取失败只是没有图标，不影响导入结果
+    for app_id in &need_extract {
+        if let Ok(item) = data_service::get_app_by_id(&conn, app_id) {
+            icon_service::refresh_app_icon(&app, &item);
+        }
+    }
+
     Ok(imported)
+}
+
+/// 决定导入后该应用使用的图标路径：
+/// 1. 配置里带了图标数据 → 写入本机图标缓存目录（换机器也能显示）；
+/// 2. 没带但原路径在本机有效 → 沿用（同一台机器上恢复配置）；
+/// 3. 都没有 → 留空并登记，导入结束后按可执行文件重新提取。
+fn import_icon_path(
+    app: &AppHandle,
+    item: &AppItem,
+    icons: &HashMap<String, String>,
+    need_extract: &mut Vec<String>,
+) -> String {
+    if let Some(encoded) = icons.get(&item.id) {
+        match utils::base64::decode(encoded) {
+            Ok(bytes) => {
+                match icon_service::store_icon_bytes(app, item.icon_path.as_deref(), &bytes) {
+                    Ok(path) => return path,
+                    Err(e) => eprintln!("[icon] 写入导入图标失败（{}）: {}", item.name, e),
+                }
+            }
+            Err(e) => eprintln!("[icon] 图标数据无效（{}）: {}", item.name, e),
+        }
+    }
+
+    if let Some(existing) = item.icon_path.as_deref() {
+        let path = utils::resolve_path(existing);
+        if path.is_file() {
+            return path.to_string_lossy().to_string();
+        }
+    }
+
+    need_extract.push(item.id.clone());
+    String::new()
 }
 
 #[cfg(test)]
@@ -335,11 +398,119 @@ mod tests {
                 is_default: true,
             }],
             apps: vec![app_item("x", "default")],
+            icons: HashMap::new(),
         };
         let json = serde_json::to_string_pretty(&cfg).unwrap();
         let back: ConfigExport = serde_json::from_str(&json).unwrap();
         assert_eq!(back.apps.len(), 1);
         assert_eq!(back.apps[0].executable_path, "C:/x.exe");
+    }
+
+    /// 旧版本导出的 JSON 没有 icons 字段，必须仍能导入。
+    #[test]
+    fn legacy_export_without_icons_still_parses() {
+        let json = r#"{
+            "version": 1,
+            "groups": [],
+            "apps": [{
+                "id": "x", "group_id": "default", "name": "记事本",
+                "executable_path": "C:/x.exe", "arguments": null, "working_directory": null,
+                "startup_window_style": 0, "launch_kind": 0, "is_python_script": false,
+                "python_interpreter_path": null, "show_console": false, "run_as_admin": false,
+                "allow_multiple_instances": true, "icon_path": "C:/icons/x.png",
+                "sort_order": 0, "created_at": "1", "updated_at": "1"
+            }]
+        }"#;
+        let back: ConfigExport = serde_json::from_str(json).unwrap();
+        assert!(back.icons.is_empty());
+        assert_eq!(back.apps.len(), 1);
+    }
+
+    /// 导出时把图标文件内容内嵌进 JSON，导入端才好还原到本机图标目录。
+    #[test]
+    fn export_embeds_icon_data() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO app_groups (id, name, sort_order, is_default) VALUES ('default', '默认分组', 0, 1)",
+            [],
+        )
+        .unwrap();
+        let created = data_service::add_app(
+            &conn,
+            &crate::models::AddAppRequest {
+                group_id: "default".into(),
+                name: "记事本".into(),
+                executable_path: "C:/notepad.exe".into(),
+                arguments: None,
+                working_directory: None,
+                startup_window_style: 0,
+                launch_kind: 0,
+                is_python_script: false,
+                python_interpreter_path: None,
+                show_console: false,
+                run_as_admin: false,
+                allow_multiple_instances: true,
+                icon_path: None,
+            },
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let icon = dir.path().join("0123456789abcdef.png");
+        std::fs::write(&icon, b"PNG-BYTES").unwrap();
+        conn.execute(
+            "UPDATE app_items SET icon_path = ? WHERE id = ?",
+            params![icon.to_string_lossy(), created.id],
+        )
+        .unwrap();
+
+        let export = build_export(&conn).unwrap();
+        let encoded = export.icons.get(&created.id).expect("应内嵌图标");
+        assert_eq!(utils::base64::decode(encoded).unwrap(), b"PNG-BYTES");
+
+        // JSON 往返后图标数据仍然可用
+        let json = serde_json::to_string(&export).unwrap();
+        let back: ConfigExport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.icons.get(&created.id), Some(encoded));
+    }
+
+    /// 图标文件不存在时导出不报错，只是不内嵌图标。
+    #[test]
+    fn export_skips_missing_icon_file() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO app_groups (id, name, sort_order, is_default) VALUES ('default', '默认分组', 0, 1)",
+            [],
+        )
+        .unwrap();
+        let created = data_service::add_app(
+            &conn,
+            &crate::models::AddAppRequest {
+                group_id: "default".into(),
+                name: "记事本".into(),
+                executable_path: "C:/notepad.exe".into(),
+                arguments: None,
+                working_directory: None,
+                startup_window_style: 0,
+                launch_kind: 0,
+                is_python_script: false,
+                python_interpreter_path: None,
+                show_console: false,
+                run_as_admin: false,
+                allow_multiple_instances: true,
+                icon_path: Some("C:/definitely/missing.png".into()),
+            },
+        )
+        .unwrap();
+
+        let export = build_export(&conn).unwrap();
+        assert!(export.icons.is_empty());
+        // 仍然保留原路径（同机恢复时还有机会用上）
+        assert_eq!(export.apps[0].id, created.id);
+        assert_eq!(
+            export.apps[0].icon_path.as_deref(),
+            Some("C:/definitely/missing.png")
+        );
     }
 
     /// 完整链路：入库 -> 读回 -> 解析启动计划 -> 真实执行 -> 记录历史。

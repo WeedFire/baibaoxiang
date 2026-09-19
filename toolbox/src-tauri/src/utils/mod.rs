@@ -1,4 +1,5 @@
 pub mod args;
+pub mod base64;
 pub mod png;
 
 use std::path::{Path, PathBuf};

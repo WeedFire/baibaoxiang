@@ -2,7 +2,11 @@ use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 use tauri::Manager;
 
+use crate::models::{AppItem, LaunchKind};
 use crate::utils::png::write_png_rgba;
+
+/// 单个图标文件的大小上限；正常 48x48 PNG 只有几 KB，超过则视为异常数据。
+pub const MAX_ICON_BYTES: u64 = 1024 * 1024;
 
 /// 图标缓存目录：`<app_data_dir>/icons`
 fn icon_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -14,13 +18,17 @@ fn icon_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// 64 位 FNV-1a，用于生成缓存文件名。
-fn fnv1a64(input: &str) -> u64 {
+fn fnv1a64_bytes(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in input.as_bytes() {
+    for b in bytes {
         hash ^= *b as u64;
         hash = hash.wrapping_mul(0x100_0000_01b3);
     }
     hash
+}
+
+fn fnv1a64(input: &str) -> u64 {
+    fnv1a64_bytes(input.as_bytes())
 }
 
 /// 生成缓存键，纳入文件大小与修改时间，避免 exe 更新后沿用旧图标。
@@ -49,6 +57,84 @@ pub fn extract_icon(
 ) -> Result<Option<String>, String> {
     let cache_dir = icon_cache_dir(app)?;
     extract_icon_into(&cache_dir, file_path, interpreter_hint)
+}
+
+/// 按应用的启动方式提取图标并写回数据库（失败不影响应用本身）。
+///
+/// 命令与网页没有本地文件，直接跳过。新增/修改应用、导入配置后都会用到。
+pub fn refresh_app_icon(app: &AppHandle, item: &AppItem) {
+    if !matches!(
+        LaunchKind::of(item),
+        LaunchKind::Program | LaunchKind::Python
+    ) {
+        return;
+    }
+    match extract_icon(
+        app,
+        &item.executable_path,
+        item.python_interpreter_path.as_deref(),
+    ) {
+        Ok(Some(icon)) => {
+            if let Ok(conn) = crate::db::get_connection(app) {
+                let _ = crate::services::data_service::set_icon_path(&conn, &item.id, Some(&icon));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("[icon] {}", e),
+    }
+}
+
+/// 读取图标文件内容（导出配置时内嵌到 JSON 用）。
+/// 文件不存在、不是普通文件或体积异常时返回 None，调用方跳过即可。
+pub fn read_icon_bytes(icon_path: &str) -> Option<Vec<u8>> {
+    let trimmed = icon_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = crate::utils::resolve_path(trimmed);
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_ICON_BYTES {
+        return None;
+    }
+    std::fs::read(&path).ok()
+}
+
+/// 把导入的图标 PNG 写入本机图标缓存目录，返回新的绝对路径。
+pub fn store_icon_bytes(
+    app: &AppHandle,
+    name_hint: Option<&str>,
+    data: &[u8],
+) -> Result<String, String> {
+    if data.is_empty() {
+        return Err("图标数据为空".to_string());
+    }
+    if data.len() as u64 > MAX_ICON_BYTES {
+        return Err("图标数据过大".to_string());
+    }
+
+    let dir = icon_cache_dir(app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建图标缓存目录: {}", e))?;
+
+    let target = dir.join(icon_file_name(name_hint, data));
+    std::fs::write(&target, data).map_err(|e| format!("写入图标失败: {}", e))?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// 决定导入图标的文件名：优先沿用导出时的文件名，否则用内容哈希（天然去重）。
+///
+/// 只接受 `16 位十六进制.png` 形式，避免路径穿越或非法文件名。
+fn icon_file_name(name_hint: Option<&str>, data: &[u8]) -> String {
+    if let Some(base) = name_hint
+        .and_then(|hint| Path::new(hint.trim()).file_name())
+        .and_then(|name| name.to_str())
+    {
+        if let Some(stem) = base.strip_suffix(".png") {
+            if stem.len() == 16 && stem.chars().all(|c| c.is_ascii_hexdigit()) {
+                return format!("{}.png", stem.to_ascii_lowercase());
+            }
+        }
+    }
+    format!("{:016x}.png", fnv1a64_bytes(data))
 }
 
 /// 与 `extract_icon` 相同，但缓存目录由调用方指定，便于测试。
@@ -274,6 +360,38 @@ mod tests {
             img.to_rgba8().pixels().any(|p| p[3] > 0),
             "提取出的图标不应全透明"
         );
+    }
+
+    #[test]
+    fn reads_existing_icon_bytes_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let icon = dir.path().join("a.png");
+        std::fs::write(&icon, b"PNG").unwrap();
+
+        assert_eq!(
+            read_icon_bytes(&icon.to_string_lossy()).unwrap(),
+            b"PNG".to_vec()
+        );
+        assert!(read_icon_bytes("").is_none());
+        assert!(read_icon_bytes(&dir.path().join("none.png").to_string_lossy()).is_none());
+        // 目录不是普通文件，应被忽略
+        assert!(read_icon_bytes(&dir.path().to_string_lossy()).is_none());
+    }
+
+    #[test]
+    fn import_file_name_prefers_hint_and_falls_back_to_hash() {
+        let data = b"PNG-DATA";
+        // 合法（16 位十六进制）的文件名沿用小写形式
+        assert_eq!(
+            icon_file_name(Some(r"C:\icons\0123456789ABCDEF.png"), data),
+            "0123456789abcdef.png"
+        );
+        // 非法或缺失时用内容哈希，同样数据得到同一文件名（去重）
+        let fallback = icon_file_name(Some("../../evil name.png"), data);
+        assert_eq!(fallback, icon_file_name(None, data));
+        assert_eq!(fallback.len(), 20);
+        assert!(!fallback.contains('/') && !fallback.contains('\\'));
+        assert_ne!(fallback, icon_file_name(None, b"OTHER"));
     }
 
     #[test]

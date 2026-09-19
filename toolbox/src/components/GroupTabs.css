@@ -74,6 +74,25 @@
   color: #1E2A20;
 }
 
+/* 双击分组后原地改名：外观尽量贴近普通标签，避免布局跳动 */
+.group-tab-editing {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid #4a9eff;
+  border-radius: 4px;
+  background: #EFF8F0;
+}
+
+.group-rename-input {
+  width: 96px;
+  border: none;
+  background: transparent;
+  color: #2F3A30;
+  font-size: 13px;
+  outline: none;
+}
+
 .group-create {
   display: flex;
   align-items: center;

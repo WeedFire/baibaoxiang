@@ -141,6 +141,7 @@ export default function App() {
               await api.createGroup(name);
               await loadData();
             }}
+            onChanged={() => void loadData()}
           />
           <LayoutCanvas
             onRefresh={() => void loadData()}
