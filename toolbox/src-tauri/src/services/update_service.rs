@@ -24,7 +24,7 @@ pub const SOURCE_URL: &str =
 /// `key.pub` 的完整内容填到下面，私钥存为 GitHub Secret
 /// `TAURI_SIGNING_PRIVATE_KEY`（`tauri signer` 用它给安装包签名）。
 /// 留空表示不校验签名；正式发布前务必填写真实公钥。
-pub const PUBLIC_KEY: &str = "";
+pub const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJCQzREQTdEMEI0NkY4MDUKUldRRitFWUxmZHJFS3hhR2pWYTNrYUV2c2l1cVRyQ2JpKzc2UGpEUWtjZ3pXNTJDUmhtK0o3eFYK";
 
 const ERR_404: &str = "更新源未找到（HTTP 404）：请检查地址，或该项目还没有发布正式版本";
 
