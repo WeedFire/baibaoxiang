@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-文件清理助手 (FileJanitor)
+文件清理助手
 ==========================
 根据 Excel 清单批量清理指定目录下的文件/文件夹，删除到系统回收站（可恢复）。
 
@@ -70,7 +70,7 @@ except Exception as _qt_err:
 
 
 # ==================== 常量与默认配置 ====================
-APP_NAME = "文件清理助手 (FileJanitor)"
+APP_NAME = "文件清理助手"
 APP_VERSION = "1.0.0"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
@@ -903,9 +903,9 @@ class FileJanitorApp(QMainWindow):
         header.setObjectName("appHeader")
         top = QHBoxLayout(header)
         top.setContentsMargins(18, 12, 18, 12)
-        title = QLabel(APP_NAME)
-        title.setObjectName("appTitle")
-        top.addWidget(title)
+        # title = QLabel(APP_NAME)
+        # title.setObjectName("appTitle")
+        # top.addWidget(title)
         top.addStretch(1)
         btn_help = QPushButton("帮助")
         btn_about = QPushButton("关于")
