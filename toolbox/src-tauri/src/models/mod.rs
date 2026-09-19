@@ -273,16 +273,11 @@ impl UpdateManifest {
     }
 }
 
-/// 更新检查设置
+/// 更新检查设置（更新源地址与公钥写死在代码里，不再暴露给用户）。
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UpdateSettings {
     /// 启动时自动检查
     pub enabled: bool,
-    /// 更新源：http(s) 地址，或本地/局域网共享路径
-    pub source_url: String,
-    /// ed25519 公钥（base64 的 32 字节）：填写后只安装验签通过的更新包
-    #[serde(default)]
-    pub pubkey: String,
     /// 发现新版本后自动下载并安装（无需手动点按钮）
     #[serde(default)]
     pub auto_install: bool,
@@ -292,8 +287,6 @@ impl Default for UpdateSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            source_url: String::new(),
-            pubkey: String::new(),
             auto_install: false,
         }
     }
@@ -355,7 +348,6 @@ pub struct UpdateCheckResult {
     pub from_cache: bool,
     /// 上次检查时间（unix 秒）
     pub checked_at: Option<i64>,
-    pub source_url: String,
     /// 出错时的可读说明
     pub message: Option<String>,
 }

@@ -13,7 +13,7 @@ fn current_version(app: &AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
-/// 设置页需要的更新状态：当前版本、开关、更新源、公钥、上次检查结果。
+/// 设置页需要的更新状态：当前版本、开关、上次检查结果。
 #[tauri::command]
 pub fn get_update_state(app: AppHandle) -> Result<UpdateState, String> {
     let conn = db::get_connection(&app)?;
@@ -21,20 +21,12 @@ pub fn get_update_state(app: AppHandle) -> Result<UpdateState, String> {
 }
 
 #[tauri::command]
-pub fn save_update_settings(
-    app: AppHandle,
-    enabled: bool,
-    source_url: String,
-    pubkey: String,
-    auto_install: bool,
-) -> Result<(), String> {
+pub fn save_update_settings(app: AppHandle, enabled: bool, auto_install: bool) -> Result<(), String> {
     let conn = db::get_connection(&app)?;
     update_service::save_settings(
         &conn,
         &UpdateSettings {
             enabled,
-            source_url,
-            pubkey,
             auto_install,
         },
     )
@@ -52,6 +44,7 @@ pub async fn check_update(app: AppHandle, force: bool) -> Result<UpdateCheckResu
             &current,
             force,
             update_service::now_secs(),
+            update_service::SOURCE_URL,
         ))
     })
     .await
@@ -69,10 +62,16 @@ pub async fn download_and_install_update(app: AppHandle) -> Result<UpdateInstall
 
     let result = tauri::async_runtime::spawn_blocking(move || {
         let conn = db::get_connection(&emitter)?;
-        update_service::install_update(&conn, &current, &mut |progress: UpdateProgress| {
-            // 进度事件：前端据此显示下载百分比与当前阶段
-            let _ = emitter.emit(PROGRESS_EVENT, progress);
-        })
+        update_service::install_update(
+            &conn,
+            &current,
+            update_service::SOURCE_URL,
+            update_service::PUBLIC_KEY,
+            &mut |progress: UpdateProgress| {
+                // 进度事件：前端据此显示下载百分比与当前阶段
+                let _ = emitter.emit(PROGRESS_EVENT, progress);
+            },
+        )
     })
     .await
     .map_err(|e| format!("安装更新失败: {}", e))??;

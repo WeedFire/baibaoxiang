@@ -13,21 +13,22 @@ const TIMEOUT: Duration = Duration::from_secs(8);
 /// 自动检查的最小间隔：间隔内直接复用上次结果，不重复联网
 pub const CHECK_INTERVAL_SECS: i64 = 6 * 60 * 60;
 
-/// 预置更新源：项目发布在 GitHub，默认取最新 Release 的信息
-/// （`tag_name` 当版本号、`body` 当更新说明、`assets` 或 `html_url` 当下载地址）。
-/// 用户可在「设置 → 版本更新」里改成自己的地址。
-pub const DEFAULT_SOURCE_URL: &str =
-    "https://api.github.com/repos/WeedFire/baibaoxiang/releases/latest";
+/// 更新源（写死在代码里，不暴露给用户）：项目发布在 GitHub，
+/// 打 tag 后由 CI 自动构建并生成 Tauri 风格的 `latest.json`。
+pub const SOURCE_URL: &str =
+    "https://github.com/WeedFire/baibaoxiang/releases/latest/download/latest.json";
 
-/// 预置 ed25519 公钥（base64 的 32 字节）。留空表示不校验签名，
-/// 此时只允许「下载后手动安装」；在「设置 → 版本更新」里填写后即可自动安装。
-pub const DEFAULT_UPDATE_PUBKEY: &str = "";
+/// 更新包验签公钥（写死在代码里，不暴露给用户）。
+///
+/// 发布前用 `tauri signer generate -w <目录> -p <密码>` 生成密钥对，把
+/// `key.pub` 的完整内容填到下面，私钥存为 GitHub Secret
+/// `TAURI_SIGNING_PRIVATE_KEY`（`tauri signer` 用它给安装包签名）。
+/// 留空表示不校验签名；正式发布前务必填写真实公钥。
+pub const PUBLIC_KEY: &str = "";
 
 const ERR_404: &str = "更新源未找到（HTTP 404）：请检查地址，或该项目还没有发布正式版本";
 
 const KEY_ENABLED: &str = "update_check_enabled";
-const KEY_SOURCE: &str = "update_source_url";
-const KEY_PUBKEY: &str = "update_pubkey";
 const KEY_AUTO_INSTALL: &str = "update_auto_install";
 const KEY_IGNORED: &str = "update_ignored_version";
 const KEY_LATEST: &str = "update_latest_version";
@@ -48,26 +49,12 @@ pub fn now_secs() -> i64 {
 pub fn load_settings(conn: &Connection) -> UpdateSettings {
     UpdateSettings {
         enabled: data_service::get_setting_bool(conn, KEY_ENABLED, true),
-        // 未配置（或用户清空）时回退到预置更新源
-        source_url: data_service::get_setting(conn, KEY_SOURCE)
-            .ok()
-            .flatten()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_SOURCE_URL.to_string()),
-        pubkey: data_service::get_setting(conn, KEY_PUBKEY)
-            .ok()
-            .flatten()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| DEFAULT_UPDATE_PUBKEY.to_string()),
         auto_install: data_service::get_setting_bool(conn, KEY_AUTO_INSTALL, false),
     }
 }
 
 pub fn save_settings(conn: &Connection, settings: &UpdateSettings) -> Result<(), String> {
     data_service::set_setting(conn, KEY_ENABLED, if settings.enabled { "1" } else { "0" })?;
-    data_service::set_setting(conn, KEY_SOURCE, settings.source_url.trim())?;
-    data_service::set_setting(conn, KEY_PUBKEY, settings.pubkey.trim())?;
     data_service::set_setting(
         conn,
         KEY_AUTO_INSTALL,
@@ -270,6 +257,7 @@ pub fn check_update(
     current_version: &str,
     force: bool,
     now: i64,
+    source_url: &str,
 ) -> UpdateCheckResult {
     let settings = load_settings(conn);
     let ignored = ignored_version(conn);
@@ -285,18 +273,6 @@ pub fn check_update(
             skipped_ignored,
             false,
             Some("已关闭自动检查更新".to_string()),
-        );
-    }
-
-    if settings.source_url.trim().is_empty() {
-        return build_result(
-            "unconfigured",
-            &settings,
-            current_version,
-            &cache,
-            skipped_ignored,
-            false,
-            Some("尚未配置更新源地址，请在「设置 → 版本更新」中填写".to_string()),
         );
     }
 
@@ -318,7 +294,7 @@ pub fn check_update(
 
     // GitHub 等接口要求请求带 User-Agent
     let user_agent = format!("baibaoxiang/{}", current_version);
-    match fetch_manifest(&settings.source_url, &user_agent) {
+    match fetch_manifest(source_url, &user_agent) {
         Ok(manifest) => {
             let _ = store_cache(conn, &manifest, now);
             let cache = load_cache(conn);
@@ -364,16 +340,17 @@ fn report(progress: &mut dyn FnMut(UpdateProgress), stage: &str, downloaded: u64
 ///
 /// 安全策略：配置了公钥时，**必须**有签名且验签通过才允许安装。
 pub fn install_update(
-    conn: &Connection,
+    _conn: &Connection,
     current_version: &str,
+    source_url: &str,
+    pubkey: &str,
     progress: &mut dyn FnMut(UpdateProgress),
 ) -> Result<UpdateInstallResult, String> {
-    let settings = load_settings(conn);
     let user_agent = format!("baibaoxiang/{}", current_version);
     let platform = update_install::platform_key();
 
     report(progress, "preparing", 0, 0, Some("正在获取更新清单…".to_string()));
-    let manifest = fetch_manifest(&settings.source_url, &user_agent)?;
+    let manifest = fetch_manifest(source_url, &user_agent)?;
     let asset = update_install::resolve_asset(&manifest, &platform).ok_or_else(|| {
         format!(
             "更新清单中没有适用于当前平台（{}）的安装包，请到发布页手动下载",
@@ -404,7 +381,7 @@ pub fn install_update(
     report(progress, "downloading", last_done, last_total, None);
 
     // 2) 验签（配置了公钥就强制校验）
-    let pubkey = settings.pubkey.trim();
+    let pubkey = pubkey.trim();
     if !pubkey.is_empty() {
         report(progress, "verifying", last_done, last_total, Some("正在校验更新包签名…".to_string()));
         let signature = asset.signature.as_deref().ok_or_else(|| {
@@ -462,7 +439,7 @@ pub fn download_dir() -> PathBuf {
 
 fn build_result(
     status: &str,
-    settings: &UpdateSettings,
+    _settings: &UpdateSettings,
     current_version: &str,
     cache: &Cache,
     ignored: bool,
@@ -487,7 +464,6 @@ fn build_result(
         ignored,
         from_cache,
         checked_at: cache.checked_at,
-        source_url: settings.source_url.clone(),
         message,
     }
 }
@@ -610,23 +586,27 @@ mod tests {
         let _ = server.join();
     }
 
-    #[test]
-    fn reports_update_available_from_local_source() {
-        let conn = db();
-        let (_dir, source) = manifest_file(
-            r#"{ "version": "1.0.2", "notes": "修复若干问题", "url": "https://example.com/a.exe" }"#,
-        );
+    /// 统一保存设置：只涉及开关。
+    fn enable_check(conn: &Connection, enabled: bool) {
         save_settings(
-            &conn,
+            conn,
             &UpdateSettings {
-                enabled: true,
-                source_url: source,
-                ..Default::default()
+                enabled,
+                auto_install: false,
             },
         )
         .unwrap();
+    }
 
-        let result = check_update(&conn, "1.0.1", false, 1_000);
+    #[test]
+    fn reports_update_available_from_local_source() {
+        let conn = db();
+        enable_check(&conn, true);
+        let (_dir, source) = manifest_file(
+            r#"{ "version": "1.0.2", "notes": "修复若干问题", "url": "https://example.com/a.exe" }"#,
+        );
+
+        let result = check_update(&conn, "1.0.1", false, 1_000, &source);
         assert_eq!(result.status, "ok");
         assert!(result.has_update);
         assert_eq!(result.latest_version.as_deref(), Some("1.0.2"));
@@ -638,18 +618,10 @@ mod tests {
     #[test]
     fn reports_up_to_date_when_versions_match() {
         let conn = db();
+        enable_check(&conn, true);
         let (_dir, source) = manifest_file(r#"{ "version": "1.0.1" }"#);
-        save_settings(
-            &conn,
-            &UpdateSettings {
-                enabled: true,
-                source_url: source,
-                ..Default::default()
-            },
-        )
-        .unwrap();
 
-        let result = check_update(&conn, "1.0.1", false, 1_000);
+        let result = check_update(&conn, "1.0.1", false, 1_000, &source);
         assert!(!result.has_update);
         assert_eq!(result.status, "ok");
     }
@@ -658,36 +630,19 @@ mod tests {
     #[test]
     fn reuses_cache_within_interval() {
         let conn = db();
+        enable_check(&conn, true);
         let (_dir, source) = manifest_file(r#"{ "version": "1.0.2" }"#);
-        save_settings(
-            &conn,
-            &UpdateSettings {
-                enabled: true,
-                source_url: source,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(check_update(&conn, "1.0.1", false, 1_000).has_update);
+        assert!(check_update(&conn, "1.0.1", false, 1_000, &source).has_update);
 
-        // 把更新源改成一个不存在的文件，缓存有效期内不应触发读取
-        save_settings(
-            &conn,
-            &UpdateSettings {
-                enabled: true,
-                source_url: "Z:/__no_such_dir__/update.json".to_string(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let cached = check_update(&conn, "1.0.1", false, 2_000);
+        // 缓存有效期内换成不存在的源，也不应触发读取
+        let bad_source = "Z:/__no_such_dir__/update.json".to_string();
+        let cached = check_update(&conn, "1.0.1", false, 2_000, &bad_source);
         assert_eq!(cached.status, "ok");
         assert!(cached.from_cache);
         assert!(cached.has_update);
 
         // 强制检查才会真正去读（此时必然失败，但历史结果仍会带上）
-        let forced = check_update(&conn, "1.0.1", true, 2_000);
+        let forced = check_update(&conn, "1.0.1", true, 2_000, &bad_source);
         assert_eq!(forced.status, "error");
         assert!(forced.has_update);
         assert!(forced.message.is_some());
@@ -696,20 +651,12 @@ mod tests {
     #[test]
     fn interval_expiry_triggers_refresh() {
         let conn = db();
+        enable_check(&conn, true);
         let (_dir, source) = manifest_file(r#"{ "version": "1.0.2" }"#);
-        save_settings(
-            &conn,
-            &UpdateSettings {
-                enabled: true,
-                source_url: source,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(check_update(&conn, "1.0.1", false, 1_000).has_update);
+        assert!(check_update(&conn, "1.0.1", false, 1_000, &source).has_update);
 
         let later = 1_000 + CHECK_INTERVAL_SECS + 1;
-        let refreshed = check_update(&conn, "1.0.1", false, later);
+        let refreshed = check_update(&conn, "1.0.1", false, later, &source);
         assert!(!refreshed.from_cache, "超过间隔后应重新读取更新源");
         assert_eq!(refreshed.checked_at, Some(later));
     }
@@ -717,59 +664,40 @@ mod tests {
     #[test]
     fn ignored_version_hides_the_update() {
         let conn = db();
+        enable_check(&conn, true);
         let (_dir, source) = manifest_file(r#"{ "version": "1.0.2" }"#);
-        save_settings(
-            &conn,
-            &UpdateSettings {
-                enabled: true,
-                source_url: source,
-                ..Default::default()
-            },
-        )
-        .unwrap();
 
         set_ignored_version(&conn, Some("1.0.2")).unwrap();
-        let result = check_update(&conn, "1.0.1", true, 1_000);
+        let result = check_update(&conn, "1.0.1", true, 1_000, &source);
         assert!(result.ignored);
         assert!(!result.has_update);
 
         set_ignored_version(&conn, None).unwrap();
-        assert!(check_update(&conn, "1.0.1", true, 1_000).has_update);
+        assert!(check_update(&conn, "1.0.1", true, 1_000, &source).has_update);
     }
 
     #[test]
     fn disabled_check_skips_network() {
         let conn = db();
-        save_settings(
-            &conn,
-            &UpdateSettings {
-                enabled: false,
-                source_url: DEFAULT_SOURCE_URL.to_string(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        enable_check(&conn, false);
 
-        let result = check_update(&conn, "1.0.1", false, 1_000);
+        let result = check_update(&conn, "1.0.1", false, 1_000, SOURCE_URL);
         assert_eq!(result.status, "disabled");
         assert!(!result.has_update);
     }
 
-    /// 更新源留空时回退到预置地址，保证新装机器开箱即用。
+    /// 更新源与公钥写死在代码里，不再依赖用户配置。
     #[test]
-    fn blank_source_falls_back_to_default() {
-        let conn = db();
-        save_settings(
-            &conn,
-            &UpdateSettings {
-                enabled: true,
-                source_url: String::new(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    fn update_source_and_pubkey_are_hardcoded() {
+        assert!(SOURCE_URL.ends_with("latest.json"), "{}", SOURCE_URL);
+        assert!(SOURCE_URL.starts_with("https://"), "{}", SOURCE_URL);
+        // 公钥常量存在（发布前应填真实值；为空表示不验签）
+        let _ = PUBLIC_KEY;
 
-        assert_eq!(load_settings(&conn).source_url, DEFAULT_SOURCE_URL);
+        let conn = db();
+        let settings = load_settings(&conn);
+        assert!(settings.enabled, "默认应开启自动检查");
+        assert!(!settings.auto_install, "默认不自动安装");
 
         let state = load_state(&conn, "1.0.1");
         assert_eq!(state.current_version, "1.0.1");
@@ -836,38 +764,22 @@ mod tests {
         path.to_string_lossy().to_string()
     }
 
-    fn enable_auto_install(conn: &Connection, source: String, pubkey: String) {
-        save_settings(
-            conn,
-            &UpdateSettings {
-                enabled: true,
-                source_url: source,
-                pubkey,
-                auto_install: true,
-            },
-        )
-        .unwrap();
-    }
-
     #[test]
-    fn settings_roundtrip_includes_pubkey_and_auto_install() {
+    fn settings_roundtrip() {
         let conn = db();
         let settings = UpdateSettings {
             enabled: false,
-            source_url: "https://example.com/latest.json".to_string(),
-            pubkey: "PUBKEY==".to_string(),
             auto_install: true,
         };
         save_settings(&conn, &settings).unwrap();
 
         let loaded = load_settings(&conn);
         assert!(!loaded.enabled);
-        assert_eq!(loaded.source_url, "https://example.com/latest.json");
-        assert_eq!(loaded.pubkey, "PUBKEY==");
         assert!(loaded.auto_install);
-        // 默认值：未配置公钥时为空、自动安装关闭
+
+        // 默认值：自动检查开启、自动安装关闭
         let empty = db();
-        assert_eq!(load_settings(&empty).pubkey, DEFAULT_UPDATE_PUBKEY);
+        assert!(load_settings(&empty).enabled);
         assert!(!load_settings(&empty).auto_install);
     }
 
@@ -885,10 +797,12 @@ mod tests {
             &format!("http://127.0.0.1:{}/update.zip", port),
             Some(&sign(&signing, &payload)),
         );
-        enable_auto_install(&conn, source, pubkey);
 
         let mut stages: Vec<String> = Vec::new();
-        let error = install_update(&conn, "1.0.0", &mut |p| stages.push(p.stage)).unwrap_err();
+        let error = install_update(&conn, "1.0.0", &source, &pubkey, &mut |p| {
+            stages.push(p.stage)
+        })
+        .unwrap_err();
 
         assert!(error.contains("暂不支持自动安装"), "错误应说明包格式不支持：{}", error);
         assert!(stages.contains(&"downloading".to_string()), "阶段：{:?}", stages);
@@ -912,9 +826,8 @@ mod tests {
             &format!("http://127.0.0.1:{}/tampered.zip", port),
             Some(&sign(&signing, b"another payload")),
         );
-        enable_auto_install(&conn, source, pubkey);
 
-        let error = install_update(&conn, "1.0.0", &mut |_| {}).unwrap_err();
+        let error = install_update(&conn, "1.0.0", &source, &pubkey, &mut |_| {}).unwrap_err();
         assert!(error.contains("签名校验失败"), "{}", error);
         let _ = std::fs::remove_file(download_dir().join("tampered.zip"));
         let _ = server.join();
@@ -933,9 +846,8 @@ mod tests {
             &format!("http://127.0.0.1:{}/unsigned.zip", port),
             None,
         );
-        enable_auto_install(&conn, source, pubkey);
 
-        let error = install_update(&conn, "1.0.0", &mut |_| {}).unwrap_err();
+        let error = install_update(&conn, "1.0.0", &source, &pubkey, &mut |_| {}).unwrap_err();
         assert!(error.contains("没有提供签名"), "{}", error);
         let _ = std::fs::remove_file(download_dir().join("unsigned.zip"));
         let _ = server.join();
@@ -951,23 +863,19 @@ mod tests {
             r#"{ "version": "9.9.9", "platforms": { "plan9-sparc": { "url": "https://example.com/x" } } }"#,
         )
         .unwrap();
-        enable_auto_install(
-            &conn,
-            path.to_string_lossy().to_string(),
-            String::new(),
-        );
+        let source = path.to_string_lossy().to_string();
 
-        let error = install_update(&conn, "1.0.0", &mut |_| {}).unwrap_err();
+        let error = install_update(&conn, "1.0.0", &source, "", &mut |_| {}).unwrap_err();
         assert!(error.contains("当前平台"), "{}", error);
         assert!(error.contains(&update_install::platform_key()), "{}", error);
     }
 
     /// 手动验证真实更新源：`cargo test --lib -- --ignored --nocapture`
-    /// 仓库没有发布版本时应得到 404 提示，发布后应解析出版本号与下载地址。
+    /// 仓库还没有发布版本时应得到 404 提示，发布后应解析出版本号与下载地址。
     #[test]
     #[ignore]
     fn live_default_source() {
-        let result = fetch_manifest(DEFAULT_SOURCE_URL, "baibaoxiang/test");
+        let result = fetch_manifest(SOURCE_URL, "baibaoxiang/test");
         match result {
             Ok(manifest) => {
                 println!("version={} url={:?}", manifest.version, manifest.download_url());

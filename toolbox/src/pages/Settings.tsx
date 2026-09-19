@@ -9,22 +9,6 @@ interface SettingsProps {
   onImported: () => void;
 }
 
-const UPDATE_JSON_EXAMPLE = `{
-  "version": "1.0.2",
-  "notes": "本次更新的内容",
-  "mandatory": false,
-  "platforms": {
-    "windows-x86_64": {
-      "signature": "ed25519 签名（base64）",
-      "url": "https://github.com/…/百宝箱_1.0.2_x64-setup.exe"
-    }
-  }
-}`;
-
-const UPDATE_MANIFEST_HINT =
-  'Tauri 风格的 latest.json：platforms 按平台给出安装包与签名，客户端自动挑选本机包并验签后安装。' +
-  '只写 url（GitHub Releases API 风格）时不校验签名，仅提供「手动下载」。';
-
 function formatTime(seconds: number): string {
   return new Date(seconds * 1000).toLocaleString();
 }
@@ -34,8 +18,6 @@ function describeUpdateCheck(result: UpdateCheckResult): {
   text: string;
 } {
   switch (result.status) {
-    case 'unconfigured':
-      return { type: 'error', text: result.message ?? '请先填写更新源地址' };
     case 'disabled':
       return { type: 'error', text: '自动检查已关闭，可点「立即检查」手动检查' };
     case 'error':
@@ -60,8 +42,6 @@ export function Settings({ onClose, onImported }: SettingsProps) {
 
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [updateEnabled, setUpdateEnabled] = useState(true);
-  const [updateSource, setUpdateSource] = useState('');
-  const [updatePubkey, setUpdatePubkey] = useState('');
   const [updateAutoInstall, setUpdateAutoInstall] = useState(false);
   const [savingUpdate, setSavingUpdate] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -78,8 +58,6 @@ export function Settings({ onClose, onImported }: SettingsProps) {
       const state = await api.getUpdateState();
       setUpdateState(state);
       setUpdateEnabled(state.settings.enabled);
-      setUpdateSource(state.settings.source_url);
-      setUpdatePubkey(state.settings.pubkey ?? '');
       setUpdateAutoInstall(state.settings.auto_install ?? false);
     } catch (err) {
       console.error('读取更新设置失败:', err);
@@ -95,7 +73,7 @@ export function Settings({ onClose, onImported }: SettingsProps) {
     setSavingUpdate(true);
     setUpdateMessage(null);
     try {
-      await api.saveUpdateSettings(updateEnabled, updateSource, updatePubkey, updateAutoInstall);
+      await api.saveUpdateSettings(updateEnabled, updateAutoInstall);
       await loadUpdateState();
       setUpdateMessage({ type: 'success', text: '更新设置已保存' });
     } catch (err) {
@@ -222,37 +200,6 @@ export function Settings({ onClose, onImported }: SettingsProps) {
               <span>启动时自动检查更新</span>
             </label>
 
-            <div className="settings-field">
-              <label htmlFor="update-source">更新源地址</label>
-              <input
-                id="update-source"
-                type="text"
-                value={updateSource}
-                onChange={(e) => setUpdateSource(e.target.value)}
-                placeholder="https://github.com/…/releases/latest/download/latest.json"
-              />
-              <span className="settings-hint">
-                推荐填 Tauri 风格的 latest.json（可按平台自动选择安装包并验签）；
-                也支持 GitHub Releases API 或本地/局域网共享路径（如{' '}
-                {'\\server\\share\\update.json'}）
-              </span>
-            </div>
-
-            <div className="settings-field">
-              <label htmlFor="update-pubkey">更新包公钥（可选）</label>
-              <input
-                id="update-pubkey"
-                type="text"
-                value={updatePubkey}
-                onChange={(e) => setUpdatePubkey(e.target.value)}
-                placeholder="ed25519 公钥（base64），留空则不校验签名"
-              />
-              <span className="settings-hint">
-                填写后只安装验签通过的更新包；清单必须提供对应 signature，
-                否则自动安装会被拒绝（与 Tauri updater 的公钥格式一致）
-              </span>
-            </div>
-
             <label className="settings-checkbox">
               <input
                 type="checkbox"
@@ -334,16 +281,6 @@ export function Settings({ onClose, onImported }: SettingsProps) {
             {updateMessage && (
               <div className={`settings-message ${updateMessage.type}`}>{updateMessage.text}</div>
             )}
-
-            <details className="settings-details">
-              <summary>更新源 JSON 格式</summary>
-              <pre>{UPDATE_JSON_EXAMPLE}</pre>
-              <p className="settings-hint">
-                版本号需高于当前版本才会提示；mandatory 为 true 时不提供「忽略/稍后」；
-                notes 为纯文本更新说明，可省略。
-              </p>
-              <p className="settings-hint">{UPDATE_MANIFEST_HINT}</p>
-            </details>
           </section>
 
           <section className="settings-section">

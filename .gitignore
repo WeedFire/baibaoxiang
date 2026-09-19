@@ -28,3 +28,4 @@ python/
 *.log
 /pyTools/handleFile/test_data_smoke/
 /pyTools/handleFile/config.json
+/toolbox/.signer-probe/

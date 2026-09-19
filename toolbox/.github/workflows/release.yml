@@ -1,0 +1,148 @@
+# 自动打包 + 发布：推 tag（v*）触发，构建 Windows 安装包 → 用 Tauri signer
+# 签名 → 生成 latest.json → 发布 GitHub Release。客户端据此自动检查/下载/安装。
+#
+# 需要的仓库 Secrets：
+#   TAURI_SIGNING_PRIVATE_KEY            —— `tauri signer generate` 生成的私钥文件内容（base64）
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   —— 生成密钥时设置的密码（若未设密码可省略）
+#   GITHUB_TOKEN                         —— softprops/action-gh-release 会自动注入，无需手动配置
+#
+# 注意：tauri.conf.json 里的 version 必须与 tag（去掉 v 前缀）一致，否则构建失败。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（如 v1.0.2）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: 校验（lint + 单测）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 前端 lint
+        run: npm run lint
+
+      - name: Rust 单元测试
+        run: cargo test --lib
+        working-directory: src-tauri
+
+  release:
+    name: 打包发布
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 解析版本号并校验一致
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          $conf = Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json
+          if ($conf.version -ne $version) {
+            throw "tauri.conf.json 版本($($conf.version))与 tag 版本($version)不一致，请先同步"
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 生成更新说明
+        shell: pwsh
+        run: |
+          $prev = git describe --tags --abbrev=0 HEAD^ 2>$null
+          if ($prev) {
+            $lines = git log --pretty=format:"- %s" "$prev..HEAD"
+          } else {
+            $lines = git log --pretty=format:"- %s"
+          }
+          if ([string]::IsNullOrWhiteSpace($lines)) { $lines = "首个版本发布" }
+          $lines | Out-File -FilePath release-notes.md -Encoding utf8
+
+      - name: 构建 Windows 安装包
+        run: npm run tauri build
+
+      - name: 整理安装包
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $bundle = "src-tauri/target/release/bundle"
+          $setup = Get-ChildItem "$bundle/nsis" -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw "未找到 NSIS 安装包" }
+          $name = "baibaoxiang_$env:VERSION_x64-setup.exe"
+          Copy-Item $setup.FullName "dist/$name"
+          $msi = Get-ChildItem "$bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($msi) { Copy-Item $msi.FullName dist/ }
+          "ASSET_NAME=$name" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "安装包：$name"
+
+      - name: 用 Tauri signer 签名
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npx tauri signer sign "dist/$env:ASSET_NAME"
+
+      - name: 生成 latest.json
+        shell: pwsh
+        run: |
+          node scripts/gen-latest.mjs `
+            --version "$env:VERSION" `
+            --repo "${{ github.repository }}" `
+            --tag "$env:TAG" `
+            --asset "$env:ASSET_NAME" `
+            --signature-file "dist/$env:ASSET_NAME.sig" `
+            --notes-file release-notes.md `
+            --out dist/latest.json
+
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: "百宝箱 v${{ env.VERSION }}"
+          body_path: release-notes.md
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

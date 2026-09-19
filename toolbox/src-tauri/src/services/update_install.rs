@@ -183,30 +183,77 @@ pub fn download(
 
 // ---------------- 验签 ----------------
 
-/// 用 base64 公钥校验 base64 签名（ed25519，与 Tauri updater 格式一致）。
+/// 用 base64 公钥校验 base64 签名，自动识别两种格式：
 ///
-/// 返回 `Ok(false)` 表示签名不匹配（数据被篡改或密钥不对）；
+/// 1. **原始 ed25519**：公钥 = 32 字节 base64，签名 = 64 字节 base64
+///    （本项目 `release-signer` / forge-updater 的直接输出）；
+/// 2. **Tauri / minisign**：公钥 = `tauri signer generate` 生成的 `key.pub` 内容，
+///    签名 = `tauri signer sign` 生成的 `.sig` 内容（两者都是 minisign 文本再套一层
+///    base64，内部为 Blake2b-512 预哈希 ed25519 签名），与 Tauri updater 完全互通。
+///
+/// 返回 `Ok(false)` 表示签名不匹配（数据被篡改或换了密钥）；
 /// 公钥/签名格式非法则返回 `Err`。
 pub fn verify_signature(pubkey_b64: &str, data: &[u8], signature_b64: &str) -> Result<bool, String> {
-    let pubkey_bytes = base64::engine::general_purpose::STANDARD
-        .decode(strip_bom(pubkey_b64).trim())
-        .map_err(|e| format!("公钥不是合法的 base64: {}", e))?;
-    if pubkey_bytes.len() != 32 {
-        return Err(format!("公钥应为 32 字节，实际 {} 字节", pubkey_bytes.len()));
-    }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&pubkey_bytes);
-    let verifying = VerifyingKey::from_bytes(&key).map_err(|e| format!("公钥无效: {}", e))?;
+    let pubkey = strip_bom(pubkey_b64).trim();
+    let signature = strip_bom(signature_b64).trim();
 
-    let sig_bytes = base64::engine::general_purpose::STANDARD
-        .decode(strip_bom(signature_b64).trim())
-        .map_err(|e| format!("签名不是合法的 base64: {}", e))?;
-    if sig_bytes.len() != 64 {
-        return Err(format!("签名应为 64 字节，实际 {} 字节", sig_bytes.len()));
+    // 格式 1：32 字节公钥 + 64 字节签名
+    if let (Ok(key), Ok(sig)) = (b64_decode(pubkey), b64_decode(signature)) {
+        if key.len() == 32 && sig.len() == 64 {
+            return verify_raw_ed25519(&key, data, &sig);
+        }
     }
-    let signature = Signature::from_slice(&sig_bytes).map_err(|e| format!("签名无效: {}", e))?;
 
+    // 格式 2：Tauri / minisign
+    verify_minisign(pubkey, data, signature)
+}
+
+fn b64_decode(text: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    base64::engine::general_purpose::STANDARD.decode(text)
+}
+
+fn verify_raw_ed25519(key: &[u8], data: &[u8], sig: &[u8]) -> Result<bool, String> {
+    let mut key_bytes = [0u8; 32];
+    key_bytes.copy_from_slice(key);
+    let verifying = VerifyingKey::from_bytes(&key_bytes).map_err(|e| format!("公钥无效: {}", e))?;
+    let signature = Signature::from_slice(sig).map_err(|e| format!("签名无效: {}", e))?;
     Ok(verifying.verify(data, &signature).is_ok())
+}
+
+fn verify_minisign(pubkey: &str, data: &[u8], signature: &str) -> Result<bool, String> {
+    let public_key = minisign_verify::PublicKey::decode(&unwrap_b64_text(pubkey)).map_err(|e| {
+        format!(
+            "公钥无法识别（应为 32 字节 ed25519 公钥的 base64，或 Tauri `signer generate` 生成的公钥）: {}",
+            e
+        )
+    })?;
+    let signature = minisign_verify::Signature::decode(&unwrap_b64_text(signature)).map_err(|e| {
+        format!(
+            "签名无法识别（应为 64 字节 ed25519 签名的 base64，或 Tauri `signer sign` 生成的 .sig）: {}",
+            e
+        )
+    })?;
+
+    match public_key.verify(data, &signature, false) {
+        Ok(()) => Ok(true),
+        // 签名对不上或不是这把公钥签的 → 校验失败（而不是格式错误）
+        Err(minisign_verify::Error::InvalidSignature)
+        | Err(minisign_verify::Error::UnexpectedKeyId) => Ok(false),
+        Err(error) => Err(format!("验签失败: {}", error)),
+    }
+}
+
+/// Tauri 的 `pubkey`/`signature` 是「minisign 文本」再套一层 base64；
+/// 这里脱掉外层 base64（原样文本则直接返回）。
+fn unwrap_b64_text(value: &str) -> String {
+    if let Ok(bytes) = b64_decode(value) {
+        if let Ok(text) = String::from_utf8(bytes) {
+            if text.contains("untrusted comment:") || text.contains("trusted comment:") {
+                return text;
+            }
+        }
+    }
+    value.to_string()
 }
 
 fn strip_bom(text: &str) -> &str {
@@ -543,6 +590,21 @@ mod tests {
         let good_key = base64::engine::general_purpose::STANDARD.encode([1u8; 32]);
         let short_sig = base64::engine::general_purpose::STANDARD.encode(b"short");
         assert!(verify_signature(&good_key, b"x", &short_sig).is_err());
+    }
+
+    /// 与 Tauri 官方 `tauri signer generate/sign` 生成的公钥/签名互通。
+    /// 夹具：用一次性密钥对固定内容签名（真实 CLI 产物）。
+    #[test]
+    fn 验签_兼容_tauri_minisign_格式() {
+        let message = b"baibaoxiang-update-fixture-2026";
+        // `tauri signer generate` 生成的 key.pub（base64 的 minisign 公钥文本）
+        let pubkey = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI1NzVCMURBQUY2NTlGMjgKUldRb24yV3YyckYxdFJZU3VpQW16MmhYODlqWU1mNnNVdXJWOXplanVPRkpHL1hFY0xwNE84VEUK";
+        // `tauri signer sign` 生成的 .sig（base64 的 minisign 签名文本）
+        let signature = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRb24yV3YyckYxdGVFZkxxamhKODNFY3VObnhMdXFBc2Y2OWRNWDZLT2NQSk1BN1A3SHA2NmlRaHVqTDNzdWN0K0dRUmZKdzZGWVZxa3VnTk96ajR0NCtmVVJjMHNSSlFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5ODI5NzY0CWZpbGU6Zml4dHVyZS5iaW4KN1laM3B6c256WXFpbWtTK2p5TkRpNTMrOFczNFBCd2xWM0lxaUhUNGRFUEJDZnBRYW93VWh3VzR2WFI3YkFqYVJQZktaUEo1RmV2elV6SE8rVmYxQ2c9PQo=";
+
+        assert!(verify_signature(pubkey, message, signature).unwrap());
+        // 内容被篡改 → 校验失败（false 而非报错）
+        assert!(!verify_signature(pubkey, b"tampered", signature).unwrap());
     }
 
     /// 起一个一次性本地 HTTP 服务，验证下载 + 进度回调确实按字节推进。

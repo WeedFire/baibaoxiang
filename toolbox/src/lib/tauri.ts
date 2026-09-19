@@ -74,10 +74,6 @@ export interface PathInspection {
 export interface UpdateSettings {
   /** 启动时自动检查更新 */
   enabled: boolean;
-  /** 更新源：http(s) 地址或本地/共享路径 */
-  source_url: string;
-  /** ed25519 公钥（base64 的 32 字节），填写后只安装验签通过的更新包 */
-  pubkey: string;
   /** 发现新版本后自动下载并安装 */
   auto_install: boolean;
 }
@@ -116,7 +112,6 @@ export interface UpdateCheckResult {
   /** 结果来自上次检查的缓存 */
   from_cache: boolean;
   checked_at: number | null;
-  source_url: string;
   message: string | null;
 }
 
@@ -213,12 +208,8 @@ export const api = {
 
   // ---- 版本更新 ----
   getUpdateState: () => invoke<UpdateState>('get_update_state'),
-  saveUpdateSettings: (
-    enabled: boolean,
-    sourceUrl: string,
-    pubkey: string,
-    autoInstall: boolean,
-  ) => invoke<void>('save_update_settings', { enabled, sourceUrl, pubkey, autoInstall }),
+  saveUpdateSettings: (enabled: boolean, autoInstall: boolean) =>
+    invoke<void>('save_update_settings', { enabled, autoInstall }),
   /** force = false 时遵守自动检查间隔，直接返回上次结果 */
   checkUpdate: (force = false) =>
     invoke<UpdateCheckResult>('check_update', { force }),
