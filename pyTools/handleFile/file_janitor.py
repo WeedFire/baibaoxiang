@@ -5,22 +5,28 @@
 根据 Excel 清单批量清理指定目录下的文件/文件夹，删除到系统回收站（可恢复）。
 
 依赖：
-    - openpyxl  读取 .xlsx（以及通过 xlrd 读取 .xls）
-    - send2trash  安全删除到回收站（缺失时回退为普通删除并提示）
+    - PyQt5        现代化图形界面
+    - openpyxl     读取 .xlsx（以及通过 xlrd 读取 .xls）
+    - send2trash   安全删除到回收站（缺失时回退为普通删除并提示）
 
-界面使用 tkinter（与百宝箱其它小工具风格一致）。
+界面使用 PyQt5（现代风格，替代旧的 tkinter 界面）。
 """
 import os
 import sys
 import json
 import re
 import time
+import traceback
 import threading
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
 from datetime import datetime
-from queue import Queue, Empty
-import xlrd
+
+# xlrd 仅用于读取 .xls；缺失时仍可正常读取 .xlsx（方法内部会按需提示）
+try:
+    import xlrd
+    XLRD_OK = True
+except Exception:
+    xlrd = None
+    XLRD_OK = False
 
 # ---------------- 第三方依赖（缺失时优雅降级） ----------------
 try:
@@ -36,6 +42,31 @@ try:
 except Exception:
     send2trash = None
     SEND2TRASH_OK = False
+
+# ---------------- PyQt5 ----------------
+try:
+    from PyQt5.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QLabel, QLineEdit, QPushButton, QComboBox, QRadioButton, QCheckBox,
+        QSpinBox, QListWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+        QTextEdit, QProgressBar, QGroupBox, QScrollArea,
+        QFileDialog, QMessageBox, QDialog, QDialogButtonBox, QMenu,
+        QPlainTextEdit, QAbstractItemView, QFrame, QSizePolicy, QAction,
+)
+    from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl
+    from PyQt5.QtGui import QColor, QTextCharFormat, QTextCursor, QDesktopServices, QFont
+except Exception as _qt_err:
+    _msg = ("无法启动「文件清理助手」：缺少 PyQt5 图形界面库。\n\n"
+            "请先安装依赖：\n    pip install PyQt5 openpyxl send2trash xlrd\n\n"
+            "详细错误：%s" % _qt_err)
+    sys.stderr.write(_msg + "\n")
+    try:
+        import ctypes
+        if sys.platform == "win32":
+            ctypes.windll.user32.MessageBoxW(0, _msg, "文件清理助手 - 启动失败", 0x10)
+    except Exception:
+        pass
+    sys.exit(1)
 
 
 # ==================== 常量与默认配置 ====================
@@ -61,10 +92,6 @@ SYSTEM_PROTECTED_MAC = ["/System", "/Library", "/Applications", "/private", "/us
 
 # 文件名非法字符（用于清洗过滤 Excel 条目）
 ILLEGAL_CHARS = set('<>:"/\\|?*')
-
-# 勾选/未勾选显示字符
-CHECKED = "☑"
-UNCHECKED = "☐"
 
 
 # ==================== 配置管理 ====================
@@ -134,7 +161,6 @@ def is_protected_path(path):
 def is_drive_root(path):
     """判断是否为磁盘根目录，如 C:\\ 或 C:"""
     p = path.rstrip("\\/").rstrip(":")
-    # C:\\ -> normpath = C:\\
     norm = os.path.normpath(path)
     drive, tail = os.path.splitdrive(norm)
     if drive and (tail in ("", "\\", "/")):
@@ -341,7 +367,6 @@ class ScanEngine:
             for rx in matchers["regex"]:
                 if rx.search(name):
                     return True
-            return False
         return False
 
     def _build_matchers(self, names, mode, ignore_case):
@@ -366,10 +391,10 @@ class ScanEngine:
         return {}
 
     def scan(self, names, target_paths, delete_type, match_mode, ignore_case,
-             recursive, max_depth, exclude_dirs, whitelist, result_queue,
-             progress_cb, log_cb):
+             recursive, max_depth, exclude_dirs, whitelist,
+             result_queue=None, result_cb=None, progress_cb=None, log_cb=None):
         """
-        遍历目标路径，匹配名称，命中结果通过 result_queue 推送（dict）。
+        遍历目标路径，匹配名称，命中结果通过 result_cb(item) 回调推送（dict）。
         delete_type: file/folder/all
         match_mode: exact/contains/regex
         """
@@ -386,13 +411,16 @@ class ScanEngine:
             if self.stop_flag:
                 break
             if not os.path.isdir(root):
-                log_cb("WARN", f"路径不存在或不是目录，已跳过：{root}")
+                if log_cb:
+                    log_cb("WARN", f"路径不存在或不是目录，已跳过：{root}")
                 continue
             if is_protected_path(root):
-                log_cb("WARN", f"系统保护目录，已跳过扫描：{root}")
+                if log_cb:
+                    log_cb("WARN", f"系统保护目录，已跳过扫描：{root}")
                 continue
             if is_drive_root(root):
-                log_cb("WARN", f"磁盘根目录扫描风险较高：{root}（已继续，请谨慎勾选）")
+                if log_cb:
+                    log_cb("WARN", f"磁盘根目录扫描风险较高：{root}（已继续，请谨慎勾选）")
 
             for path, is_dir in self._walk(root, recursive, max_depth, exclude_set):
                 if self.stop_flag:
@@ -435,14 +463,18 @@ class ScanEngine:
                             if not any(m["path"] == path for m in self.matched):
                                 self.matched.append(item)
                                 matched_count += 1
-                                result_queue.put(item)
+                                if result_cb is not None:
+                                    result_cb(item)
+                                elif result_queue is not None:
+                                    result_queue.put(item)
                 except Exception:
                     continue
                 done += 1
-                if done % 200 == 0:
+                if done % 200 == 0 and progress_cb:
                     progress_cb(done, matched_count)
 
-        progress_cb(done, matched_count)
+        if progress_cb:
+            progress_cb(done, matched_count)
         return scanned_count, matched_count
 
     @staticmethod
@@ -521,28 +553,37 @@ class DeleteEngine:
             try:
                 # 白名单 / 系统保护兜底
                 if ScanEngine._in_whitelist(path, whitelist):
-                    log_cb("WARN", f"白名单保护，跳过：{path}")
+                    if log_cb:
+                        log_cb("WARN", f"白名单保护，跳过：{path}")
                     skipped += 1
-                    item_cb({"path": path, "type": item_type, "size": size,
-                             "result": "skipped", "error": "白名单保护"})
+                    if item_cb:
+                        item_cb({"path": path, "type": item_type, "size": size,
+                                 "result": "skipped", "error": "白名单保护"})
                     done += 1
-                    progress_cb(done, total)
+                    if progress_cb:
+                        progress_cb(done, total)
                     continue
                 if is_protected_path(path):
-                    log_cb("WARN", f"系统保护，跳过：{path}")
+                    if log_cb:
+                        log_cb("WARN", f"系统保护，跳过：{path}")
                     skipped += 1
-                    item_cb({"path": path, "type": item_type, "size": size,
-                             "result": "skipped", "error": "系统保护目录"})
+                    if item_cb:
+                        item_cb({"path": path, "type": item_type, "size": size,
+                                 "result": "skipped", "error": "系统保护目录"})
                     done += 1
-                    progress_cb(done, total)
+                    if progress_cb:
+                        progress_cb(done, total)
                     continue
                 if not os.path.exists(path):
-                    log_cb("INFO", f"已不存在，跳过：{path}")
+                    if log_cb:
+                        log_cb("INFO", f"已不存在，跳过：{path}")
                     skipped += 1
-                    item_cb({"path": path, "type": item_type, "size": size,
-                             "result": "skipped", "error": "已不存在"})
+                    if item_cb:
+                        item_cb({"path": path, "type": item_type, "size": size,
+                                 "result": "skipped", "error": "已不存在"})
                     done += 1
-                    progress_cb(done, total)
+                    if progress_cb:
+                        progress_cb(done, total)
                     continue
 
                 if SEND2TRASH_OK:
@@ -556,31 +597,125 @@ class DeleteEngine:
                         os.remove(path)
                 success += 1
                 freed += (size or 0)
-                log_cb("SUCCESS", f"已删除：{path}（{item_type}）")
-                item_cb({"path": path, "type": item_type, "size": size,
-                         "result": "success", "error": ""})
+                if log_cb:
+                    log_cb("SUCCESS", f"已删除：{path}（{item_type}）")
+                if item_cb:
+                    item_cb({"path": path, "type": item_type, "size": size,
+                             "result": "success", "error": ""})
             except Exception as e:
                 failed += 1
                 err = str(e)
                 if "being used" in err or "拒绝访问" in err or "Permission" in err:
                     err = "文件被占用/权限不足"
-                log_cb("ERROR", f"删除失败：{path}，原因：{err}")
-                item_cb({"path": path, "type": item_type, "size": size,
-                         "result": "failed", "error": err})
+                if log_cb:
+                    log_cb("ERROR", f"删除失败：{path}，原因：{err}")
+                if item_cb:
+                    item_cb({"path": path, "type": item_type, "size": size,
+                             "result": "failed", "error": err})
             done += 1
-            progress_cb(done, total)
+            if progress_cb:
+                progress_cb(done, total)
 
         return {"total": total, "success": success, "failed": failed,
                 "skipped": skipped, "freed": freed}
 
 
+# ==================== 可排序表格项 ====================
+class NumericItem(QTableWidgetItem):
+    """用于按数值排序的列（如序号、大小）。"""
+
+    def __init__(self, text, value):
+        super().__init__(text)
+        self._value = value
+
+    def __lt__(self, other):
+        try:
+            return self._value < other._value
+        except Exception:
+            return str(self._value) < str(other._value)
+
+
+# ==================== 后台工作线程 ====================
+class ScanWorker(QThread):
+    progress = pyqtSignal(int, int)
+    log = pyqtSignal(str, str)
+    result = pyqtSignal(object)
+    finished = pyqtSignal(int, int)
+
+    def __init__(self, engine, names, target_paths, delete_type, match_mode,
+                 ignore_case, recursive, max_depth, exclude_dirs, whitelist):
+        super().__init__()
+        self.engine = engine
+        self.names = names
+        self.target_paths = target_paths
+        self.delete_type = delete_type
+        self.match_mode = match_mode
+        self.ignore_case = ignore_case
+        self.recursive = recursive
+        self.max_depth = max_depth
+        self.exclude_dirs = exclude_dirs
+        self.whitelist = whitelist
+
+    def run(self):
+        try:
+            scanned, matched = self.engine.scan(
+                names=self.names,
+                target_paths=self.target_paths,
+                delete_type=self.delete_type,
+                match_mode=self.match_mode,
+                ignore_case=self.ignore_case,
+                recursive=self.recursive,
+                max_depth=self.max_depth if self.max_depth > 0 else None,
+                exclude_dirs=self.exclude_dirs,
+                whitelist=self.whitelist,
+                result_cb=lambda item: self.result.emit(item),
+                progress_cb=lambda d, m: self.progress.emit(d, m),
+                log_cb=lambda lvl, msg: self.log.emit(lvl, msg),
+            )
+            self.finished.emit(scanned, matched)
+        except Exception as e:
+            self.log.emit("ERROR", "扫描线程异常：" +
+                          "".join(traceback.format_exception_only(type(e), e)).strip())
+            self.finished.emit(0, 0)
+
+
+class DeleteWorker(QThread):
+    progress = pyqtSignal(int, int)
+    item = pyqtSignal(object)
+    log = pyqtSignal(str, str)
+    finished = pyqtSignal(object, float)
+
+    def __init__(self, engine, items, whitelist):
+        super().__init__()
+        self.engine = engine
+        self.items = items
+        self.whitelist = whitelist
+
+    def run(self):
+        start = time.time()
+        try:
+            report = self.engine.delete_items(
+                items=self.items,
+                whitelist=self.whitelist,
+                progress_cb=lambda d, t: self.progress.emit(d, t),
+                item_cb=lambda r: self.item.emit(r),
+                log_cb=lambda lvl, msg: self.log.emit(lvl, msg),
+            )
+        except Exception as e:
+            self.log.emit("ERROR", "删除线程异常：" +
+                          "".join(traceback.format_exception_only(type(e), e)).strip())
+            report = {"success": 0, "failed": 0, "skipped": 0, "freed": 0}
+        elapsed = time.time() - start
+        self.finished.emit(report, elapsed)
+
+
 # ==================== 主界面 ====================
-class FileJanitorApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title(f"{APP_NAME} v{APP_VERSION}")
-        self.root.geometry("1200x800")
-        self.root.minsize(1000, 700)
+class FileJanitorApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
+        self.resize(1200, 800)
+        self.setMinimumSize(1000, 700)
 
         self.cfg = load_config()
         self.excel = ExcelReader()
@@ -588,15 +723,14 @@ class FileJanitorApp:
         self.excel_stats = {}
         self.target_paths = []         # 目标路径列表
         self.scan_engine = None
-        self.scan_thread = None
+        self.scan_worker = None
         self.delete_engine = None
-        self.delete_thread = None
-        self.result_queue = Queue()
+        self.delete_worker = None
         self.result_items = []         # 已加入表格的结果 dict
         self.checked = set()           # 已勾选的 path 集合（勾选真相来源）
         self.whitelist = self.cfg.get("whitelist_paths", [])
         self.delete_log = []           # 删除日志（导出用）
-        self._after_id = None
+        self._loading = False          # 批量刷新表格时的保护标志
 
         # 当前匹配设置
         self.delete_type = self.cfg.get("delete_type", "all")
@@ -606,255 +740,524 @@ class FileJanitorApp:
         self.max_depth = self.cfg.get("max_depth", 0)  # 0 = 无限制
         self.exclude_text = ",".join(self.cfg.get("exclude_paths", []))
 
-        self.setup_ui()
-        self.after_id_drain = None
+        self._ready = False             # 构造完成前忽略设置变更信号
+        self._build_ui()
         self._restore_config()
-        self._start_drain()
+        self._apply_style()
+        self._ready = True
+
+    # ---------------- 样式 ----------------
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QMainWindow, QWidget {
+                background: #eef3ee; color: #243029;
+                font-family: "Microsoft YaHei UI", "Segoe UI", "PingFang SC",
+                             "Microsoft YaHei", sans-serif;
+            }
+
+            /* 顶部品牌色带 */
+            #appHeader {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                            stop:0 #2f9e6b, stop:1 #3aa0c2);
+            }
+            #appTitle {
+                font-size: 19px; font-weight: 700; color: #ffffff; letter-spacing: 1px;
+            }
+            #topBtn {
+                background: rgba(255,255,255,0.14); border: none; color: #ffffff;
+                border-radius: 8px; padding: 6px 16px; font-size: 13px;
+            }
+            #topBtn:hover { background: rgba(255,255,255,0.28); }
+            #topBtn:pressed { background: rgba(255,255,255,0.38); }
+
+            /* 分组卡片 */
+            QGroupBox {
+                background: #ffffff; border: 1px solid #dde8df; border-radius: 12px;
+                margin-top: 14px; padding: 16px 14px 12px 14px;
+                font-weight: 600; color: #1f2e25; font-size: 13px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin; left: 14px; padding: 0 8px;
+                color: #2f9e6b; background: #eef3ee;
+            }
+
+            QLabel { color: #4a5a50; font-size: 13px; }
+            #infoLabel { color: #2f9e6b; font-weight: 600; }
+            #successLabel { color: #1f9d55; font-weight: 600; font-size: 14px; }
+
+            QLineEdit, QComboBox, QSpinBox, QListWidget, QPlainTextEdit {
+                background: #ffffff; border: 1px solid #cdded0; border-radius: 8px;
+                padding: 7px 10px; color: #243029; font-size: 13px;
+                selection-background-color: #bfe3cf;
+            }
+            QLineEdit:hover, QComboBox:hover { border: 1px solid #a9c7b4; }
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #2f9e6b; }
+            QListWidget { min-height: 60px; outline: 0; }
+            QListWidget::item { padding: 4px; border-radius: 4px; }
+            QListWidget::item:selected { background: #dcefee; color: #1f2e25; }
+
+            QPushButton {
+                background: #eaf1ec; border: 1px solid #cdded0; border-radius: 8px;
+                padding: 8px 16px; color: #243029; font-size: 13px;
+            }
+            QPushButton:hover { background: #dde9e0; border-color: #b7cdbc; }
+            QPushButton:pressed { background: #cfe0d3; }
+            QPushButton:disabled { color: #9fb0a4; background: #f1f5f2; border-color: #e2eae4; }
+
+            #accentBtn {
+                background: #2f9e6b; color: #fff; border: none; font-weight: 600;
+                padding: 10px 20px; font-size: 14px;
+            }
+            #accentBtn:hover { background: #29885d; }
+            #accentBtn:pressed { background: #237a52; }
+            #accentBtn:disabled { background: #a9c7b4; }
+
+            #accentBtnSmall {
+                background: #2f9e6b; color: #fff; border: none; border-radius: 8px;
+                padding: 7px 14px; font-size: 13px;
+            }
+            #accentBtnSmall:hover { background: #29885d; }
+
+            /* 破坏性操作：醒目的红色按钮 */
+            #dangerBtn {
+                background: #e5484d; color: #fff; border: none; font-weight: 600;
+                padding: 10px 20px; font-size: 14px; border-radius: 8px;
+            }
+            #dangerBtn:hover { background: #d23b40; }
+            #dangerBtn:pressed { background: #bd3439; }
+            #dangerBtn:disabled { background: #e7a9ab; }
+
+            #warnBtn {
+                background: #ffe3e3; color: #c0392b; border: 1px solid #f3b6b6;
+                border-radius: 8px; padding: 8px 16px;
+            }
+            #warnBtn:hover { background: #ffd0d0; }
+            #warnBtn:disabled { color: #b9a3a3; background: #f3eeee; border-color: #ece2e2; }
+
+            #ghostBtn {
+                background: transparent; border: 1px solid #cdded0; border-radius: 8px;
+                padding: 7px 14px; color: #3a4a40;
+            }
+            #ghostBtn:hover { background: #e7f0ea; border-color: #b7cdbc; }
+
+            /* 结果表格 */
+            #resultTable {
+                background: #ffffff; border: 1px solid #dde8df; border-radius: 12px;
+                gridline-color: #eef3ee; selection-background-color: #dcefee;
+                font-size: 13px; alternate-background-color: #f6faf7;
+            }
+            #resultTable::item { padding: 6px 4px; }
+            #resultTable::item:selected { color: #1f2e25; }
+            #resultTable::item:hover { background: #eaf6ef; }
+            QHeaderView::section {
+                background: #e7f1ea; color: #1f2e25; border: none; padding: 9px 8px;
+                font-weight: 600; font-size: 12px; border-bottom: 2px solid #d2e6d8;
+            }
+            QHeaderView::section:hover { background: #dcebdf; }
+
+            QScrollArea { background: transparent; border: none; }
+
+            QProgressBar {
+                border: 1px solid #cdded0; border-radius: 8px; background: #eef3ee;
+                text-align: center; height: 16px; color: #3a4a40; font-size: 12px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                            stop:0 #2f9e6b, stop:1 #3aa0c2);
+                border-radius: 7px;
+            }
+
+            QPlainTextEdit { font-family: Consolas, "Courier New", monospace; font-size: 12px; border-radius: 8px; }
+
+            QComboBox QAbstractItemView {
+                background: #fff; border: 1px solid #cdded0; border-radius: 8px;
+                selection-background-color: #dcefee; outline: 0;
+            }
+
+            /* 现代细滚动条 */
+            QScrollBar:vertical { background: #eef3ee; width: 10px; border-radius: 5px; }
+            QScrollBar::handle:vertical { background: #c2d6c7; border-radius: 5px; min-height: 30px; }
+            QScrollBar::handle:vertical:hover { background: #a9c4af; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal { background: #eef3ee; height: 10px; border-radius: 5px; }
+            QScrollBar::handle:horizontal { background: #c2d6c7; border-radius: 5px; min-width: 30px; }
+            QScrollBar::handle:horizontal:hover { background: #a9c4af; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+            QCheckBox { spacing: 6px; color: #3a4a40; }
+            QCheckBox::indicator { width: 16px; height: 16px; }
+            QRadioButton { spacing: 6px; color: #3a4a40; }
+            QDialog { background: #eef3ee; }
+        """)
 
     # ---------------- UI 构建 ----------------
-    def setup_ui(self):
-        # 顶部工具栏
-        top = ttk.Frame(self.root)
-        top.pack(side=tk.TOP, fill=tk.X)
-        ttk.Label(top, text=APP_NAME, font=("Microsoft YaHei", 14, "bold")).pack(side=tk.LEFT, padx=10, pady=6)
-        ttk.Button(top, text="帮助", command=self.show_help).pack(side=tk.RIGHT, padx=6)
-        ttk.Button(top, text="关于", command=self.show_about).pack(side=tk.RIGHT, padx=6)
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(14, 14, 14, 14)
+        root_layout.setSpacing(10)
 
-        # 主区域：左配置 右结果
-        main = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=6)
+        # 顶部标题栏（品牌色带）
+        header = QWidget()
+        header.setObjectName("appHeader")
+        top = QHBoxLayout(header)
+        top.setContentsMargins(18, 12, 18, 12)
+        title = QLabel(APP_NAME)
+        title.setObjectName("appTitle")
+        top.addWidget(title)
+        top.addStretch(1)
+        btn_help = QPushButton("帮助")
+        btn_about = QPushButton("关于")
+        btn_help.setObjectName("topBtn")
+        btn_about.setObjectName("topBtn")
+        btn_help.clicked.connect(self.show_help)
+        btn_about.clicked.connect(self.show_about)
+        top.addWidget(btn_help)
+        top.addWidget(btn_about)
+        root_layout.addWidget(header)
 
-        left = ttk.Frame(main, width=420)
-        right = ttk.Frame(main)
-        main.add(left, weight=0)
-        main.add(right, weight=1)
+        # 主分割：左配置 / 右结果
+        splitter = QHBoxLayout()
+        splitter.setSpacing(10)
+        left = self._build_left()
+        right = self._build_right()
+        splitter.addWidget(left, 0)
+        splitter.addWidget(right, 1)
+        root_layout.addLayout(splitter, 1)
 
-        self._build_left(left)
-        self._build_right(right)
-        self._build_log_bar()
+        # 底部：日志 + 进度 + 删除
+        self._build_bottom(root_layout)
 
-    def _build_left(self, parent):
+    # 左侧滚动配置区
+    def _build_left(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(420)
+        scroll.setMaximumWidth(460)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setSpacing(12)
+        layout.setContentsMargins(4, 4, 8, 4)
+
         # ① 数据源配置
-        f1 = ttk.LabelFrame(parent, text="① 数据源配置（Excel 清单）", padding=8)
-        f1.pack(fill=tk.X, pady=(0, 6))
+        f1 = QGroupBox("① 数据源配置（Excel 清单）")
+        f1_layout = QVBoxLayout(f1)
+        f1_layout.setSpacing(6)
+        f1_layout.addWidget(QLabel("Excel 文件："))
 
-        ttk.Label(f1, text="Excel 文件:").pack(anchor=tk.W)
-        ex_row = ttk.Frame(f1)
-        ex_row.pack(fill=tk.X, pady=2)
-        self.excel_path_var = tk.StringVar()
-        ttk.Entry(ex_row, textvariable=self.excel_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(ex_row, text="浏览", command=self.browse_excel).pack(side=tk.LEFT, padx=4)
+        ex_row = QHBoxLayout()
+        self.excel_path_edit = QLineEdit()
+        self.excel_path_edit.setPlaceholderText("选择 Excel 文件…")
+        browse_btn = QPushButton("浏览")
+        browse_btn.setObjectName("accentBtnSmall")
+        browse_btn.clicked.connect(self.browse_excel)
+        ex_row.addWidget(self.excel_path_edit, 1)
+        ex_row.addWidget(browse_btn)
+        f1_layout.addLayout(ex_row)
 
-        sheet_row = ttk.Frame(f1)
-        sheet_row.pack(fill=tk.X, pady=2)
-        ttk.Label(sheet_row, text="工作表:").pack(side=tk.LEFT)
-        self.sheet_var = tk.StringVar()
-        self.sheet_combo = ttk.Combobox(sheet_row, textvariable=self.sheet_var, state="readonly", width=18)
-        self.sheet_combo.pack(side=tk.LEFT, padx=4)
-        self.sheet_combo.bind("<<ComboboxSelected>>", lambda e: self.on_sheet_changed())
-        ttk.Label(sheet_row, text="数据列:").pack(side=tk.LEFT, padx=(8, 0))
-        self.col_var = tk.StringVar()
-        self.col_combo = ttk.Combobox(sheet_row, textvariable=self.col_var, state="readonly", width=18)
-        self.col_combo.pack(side=tk.LEFT, padx=4)
-        self.col_combo.bind("<<ComboboxSelected>>", lambda e: self.on_column_changed())
+        sheet_row = QHBoxLayout()
+        sheet_row.addWidget(QLabel("工作表："))
+        self.sheet_combo = QComboBox()
+        self.sheet_combo.setMinimumWidth(120)
+        self.sheet_combo.currentTextChanged.connect(lambda _: self.on_sheet_changed())
+        sheet_row.addWidget(self.sheet_combo, 1)
+        sheet_row.addWidget(QLabel("数据列："))
+        self.col_combo = QComboBox()
+        self.col_combo.setMinimumWidth(120)
+        self.col_combo.currentTextChanged.connect(lambda _: self.on_column_changed())
+        sheet_row.addWidget(self.col_combo, 1)
+        f1_layout.addLayout(sheet_row)
 
-        self.excel_stat_var = tk.StringVar(value="有效条目: 0 条")
-        ttk.Label(f1, textvariable=self.excel_stat_var, foreground="blue").pack(anchor=tk.W, pady=2)
-        ttk.Button(f1, text="预览前 20 行", command=self.preview_excel).pack(anchor=tk.W, pady=2)
+        self.excel_stat_label = QLabel("有效条目: 0 条")
+        self.excel_stat_label.setObjectName("infoLabel")
+        f1_layout.addWidget(self.excel_stat_label)
+
+        preview_btn = QPushButton("预览前 20 行")
+        preview_btn.setObjectName("ghostBtn")
+        preview_btn.clicked.connect(self.preview_excel)
+        f1_layout.addWidget(preview_btn, 0, Qt.AlignLeft)
+        layout.addWidget(f1)
 
         # ② 扫描配置
-        f2 = ttk.LabelFrame(parent, text="② 扫描配置（目标路径）", padding=8)
-        f2.pack(fill=tk.X, pady=(0, 6))
+        f2 = QGroupBox("② 扫描配置（目标路径）")
+        f2_layout = QVBoxLayout(f2)
+        f2_layout.setSpacing(6)
+        f2_layout.addWidget(QLabel("目标路径："))
 
-        ttk.Label(f2, text="目标路径:").pack(anchor=tk.W)
-        path_list_frame = ttk.Frame(f2)
-        path_list_frame.pack(fill=tk.X, pady=2)
-        self.path_listbox = tk.Listbox(path_list_frame, height=4)
-        self.path_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        path_scroll = ttk.Scrollbar(path_list_frame, orient=tk.VERTICAL, command=self.path_listbox.yview)
-        self.path_listbox.configure(yscrollcommand=path_scroll.set)
-        path_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.path_list = QListWidget()
+        self.path_list.setMaximumHeight(110)
+        f2_layout.addWidget(self.path_list)
 
-        pbtn = ttk.Frame(f2)
-        pbtn.pack(fill=tk.X, pady=2)
-        ttk.Button(pbtn, text="添加路径", command=self.add_target_path).pack(side=tk.LEFT, padx=2)
-        ttk.Button(pbtn, text="删除选中", command=self.remove_target_path).pack(side=tk.LEFT, padx=2)
-        ttk.Button(pbtn, text="清空", command=self.clear_target_paths).pack(side=tk.LEFT, padx=2)
+        pbtn = QHBoxLayout()
+        add_btn = QPushButton("添加路径")
+        del_btn = QPushButton("删除选中")
+        clr_btn = QPushButton("清空")
+        add_btn.setObjectName("ghostBtn")
+        del_btn.setObjectName("ghostBtn")
+        clr_btn.setObjectName("ghostBtn")
+        add_btn.clicked.connect(self.add_target_path)
+        del_btn.clicked.connect(self.remove_target_path)
+        clr_btn.clicked.connect(self.clear_target_paths)
+        pbtn.addWidget(add_btn)
+        pbtn.addWidget(del_btn)
+        pbtn.addWidget(clr_btn)
+        pbtn.addStretch(1)
+        f2_layout.addLayout(pbtn)
 
-        # 排除路径(高级)
-        ttk.Label(f2, text="排除目录(逗号分隔,如 .git,node_modules):").pack(anchor=tk.W, pady=(4, 0))
-        self.exclude_var = tk.StringVar(value=self.exclude_text)
-        ttk.Entry(f2, textvariable=self.exclude_var).pack(fill=tk.X, pady=2)
-        ttk.Label(f2, text="白名单(永不被删,逗号分隔):").pack(anchor=tk.W, pady=(2, 0))
-        self.whitelist_var = tk.StringVar(value=",".join(self.whitelist))
-        ttk.Entry(f2, textvariable=self.whitelist_var).pack(fill=tk.X, pady=2)
+        f2_layout.addWidget(QLabel("排除目录（逗号分隔，如 .git,node_modules）："))
+        self.exclude_edit = QLineEdit(self.exclude_text)
+        self.exclude_edit.editingFinished.connect(self.on_settings_changed)
+        f2_layout.addWidget(self.exclude_edit)
+
+        f2_layout.addWidget(QLabel("白名单（永不被删，逗号分隔）："))
+        self.whitelist_edit = QLineEdit(",".join(self.whitelist))
+        self.whitelist_edit.editingFinished.connect(self.on_settings_changed)
+        f2_layout.addWidget(self.whitelist_edit)
+        layout.addWidget(f2)
 
         # ③ 匹配设置
-        f3 = ttk.LabelFrame(parent, text="③ 匹配设置", padding=8)
-        f3.pack(fill=tk.X, pady=(0, 6))
+        f3 = QGroupBox("③ 匹配设置")
+        f3_layout = QVBoxLayout(f3)
+        f3_layout.setSpacing(8)
 
-        ttk.Label(f3, text="删除类型:").pack(anchor=tk.W)
-        dt_frame = ttk.Frame(f3)
-        dt_frame.pack(fill=tk.X, pady=2)
-        self.dt_var = tk.StringVar(value=self.delete_type)
-        for val, lab in [("file", "仅文件"), ("folder", "仅文件夹"), ("all", "全部")]:
-            ttk.Radiobutton(dt_frame, text=lab, variable=self.dt_var, value=val,
-                            command=self.on_settings_changed).pack(side=tk.LEFT, padx=4)
+        f3_layout.addWidget(QLabel("删除类型："))
+        dt_row = QHBoxLayout()
+        self.dt_group = self._radio_row(dt_row, [("file", "仅文件"), ("folder", "仅文件夹"), ("all", "全部")], self.delete_type)
+        f3_layout.addLayout(dt_row)
 
-        ttk.Label(f3, text="匹配模式:").pack(anchor=tk.W, pady=(4, 0))
-        mm_frame = ttk.Frame(f3)
-        mm_frame.pack(fill=tk.X, pady=2)
-        self.mm_var = tk.StringVar(value=self.match_mode)
-        for val, lab in [("exact", "精确"), ("contains", "包含"), ("regex", "正则")]:
-            ttk.Radiobutton(mm_frame, text=lab, variable=self.mm_var, value=val,
-                            command=self.on_settings_changed).pack(side=tk.LEFT, padx=4)
+        f3_layout.addWidget(QLabel("匹配模式："))
+        mm_row = QHBoxLayout()
+        self.mm_group = self._radio_row(mm_row, [("exact", "精确"), ("contains", "包含"), ("regex", "正则")], self.match_mode)
+        f3_layout.addLayout(mm_row)
 
-        opt = ttk.Frame(f3)
-        opt.pack(fill=tk.X, pady=2)
-        self.rec_var = tk.BooleanVar(value=self.recursive)
-        ttk.Checkbutton(opt, text="递归子目录", variable=self.rec_var,
-                        command=self.on_settings_changed).pack(side=tk.LEFT, padx=4)
-        self.ic_var = tk.BooleanVar(value=self.ignore_case)
-        ttk.Checkbutton(opt, text="忽略大小写", variable=self.ic_var,
-                        command=self.on_settings_changed).pack(side=tk.LEFT, padx=4)
+        opt_row = QHBoxLayout()
+        self.rec_chk = QCheckBox("递归子目录")
+        self.ic_chk = QCheckBox("忽略大小写")
+        self.rec_chk.setChecked(self.recursive)
+        self.ic_chk.setChecked(self.ignore_case)
+        self.rec_chk.toggled.connect(self.on_settings_changed)
+        self.ic_chk.toggled.connect(self.on_settings_changed)
+        opt_row.addWidget(self.rec_chk)
+        opt_row.addWidget(self.ic_chk)
+        opt_row.addStretch(1)
+        f3_layout.addLayout(opt_row)
 
-        depth_frame = ttk.Frame(f3)
-        depth_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(depth_frame, text="最大深度(0=无限):").pack(side=tk.LEFT)
-        self.depth_var = tk.IntVar(value=self.max_depth)
-        ttk.Spinbox(depth_frame, from_=0, to=20, width=5,
-                    textvariable=self.depth_var,
-                    command=self.on_settings_changed).pack(side=tk.LEFT, padx=4)
+        depth_row = QHBoxLayout()
+        depth_row.addWidget(QLabel("最大深度（0 = 无限）："))
+        self.depth_spin = QSpinBox()
+        self.depth_spin.setRange(0, 20)
+        self.depth_spin.setValue(self.max_depth)
+        self.depth_spin.valueChanged.connect(self.on_settings_changed)
+        depth_row.addWidget(self.depth_spin)
+        depth_row.addStretch(1)
+        f3_layout.addLayout(depth_row)
+        layout.addWidget(f3)
 
         # 操作按钮
-        act = ttk.Frame(parent)
-        act.pack(fill=tk.X, pady=4)
-        self.scan_btn = ttk.Button(act, text="扫描预览", command=self.start_scan)
-        self.scan_btn.pack(side=tk.LEFT, padx=4)
-        self.scan_stop_btn = ttk.Button(act, text="取消扫描", command=self.stop_scan, state=tk.DISABLED)
-        self.scan_stop_btn.pack(side=tk.LEFT, padx=4)
-        ttk.Button(act, text="清空结果", command=self.clear_results).pack(side=tk.LEFT, padx=4)
+        act = QHBoxLayout()
+        self.scan_btn = QPushButton("扫描预览")
+        self.scan_btn.setObjectName("accentBtn")
+        self.scan_stop_btn = QPushButton("取消扫描")
+        self.scan_stop_btn.setObjectName("warnBtn")
+        self.scan_stop_btn.setEnabled(False)
+        self.clear_btn = QPushButton("清空结果")
+        self.clear_btn.setObjectName("ghostBtn")
+        self.scan_btn.clicked.connect(self.start_scan)
+        self.scan_stop_btn.clicked.connect(self.stop_scan)
+        self.clear_btn.clicked.connect(self.clear_results)
+        act.addWidget(self.scan_btn)
+        act.addWidget(self.scan_stop_btn)
+        act.addWidget(self.clear_btn)
+        act.addStretch(1)
+        layout.addLayout(act)
 
-    def _build_right(self, parent):
-        ctrl = ttk.Frame(parent)
-        ctrl.pack(fill=tk.X, pady=(0, 4))
-        self.result_stat_var = tk.StringVar(value="匹配：文件 0 | 文件夹 0 | 总大小 0")
-        ttk.Label(ctrl, textvariable=self.result_stat_var, foreground="green").pack(side=tk.LEFT)
-        ttk.Button(ctrl, text="全选", command=self.select_all).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(ctrl, text="全不选", command=self.select_none).pack(side=tk.RIGHT, padx=2)
-        ttk.Label(ctrl, text="筛选:").pack(side=tk.RIGHT, padx=(8, 2))
-        self.filter_var = tk.StringVar()
-        self.filter_var.trace_add("write", lambda *a: self.apply_filter())
-        ttk.Entry(ctrl, textvariable=self.filter_var, width=16).pack(side=tk.RIGHT)
+        layout.addStretch(1)
+        scroll.setWidget(container)
+        return scroll
 
-        # 结果表格
-        table_frame = ttk.Frame(parent)
-        table_frame.pack(fill=tk.BOTH, expand=True)
-        cols = ("选择", "#", "类型", "名称", "完整路径", "大小", "修改时间", "匹配条目")
-        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="extended")
-        widths = {"选择": 40, "#": 50, "类型": 70, "名称": 180, "完整路径": 280,
-                  "大小": 90, "修改时间": 130, "匹配条目": 120}
-        for c in cols:
-            anchor = tk.W if c in ("名称", "完整路径", "匹配条目") else tk.CENTER
-            self.tree.heading(c, text=c, anchor=anchor,
-                              command=lambda col=c: self.sort_by_column(col))
-            self.tree.column(c, width=widths[c], anchor=anchor)
-        yscroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=yscroll.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        yscroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree.bind("<Button-1>", self.on_tree_click)
-        # 右键菜单
-        self.ctx_menu = tk.Menu(self.tree, tearoff=0)
-        self.ctx_menu.add_command(label="打开所在文件夹", command=self.ctx_open_folder)
-        self.ctx_menu.add_command(label="复制路径", command=self.ctx_copy_path)
-        self.ctx_menu.add_command(label="排除此项", command=self.ctx_exclude)
-        self.tree.bind("<Button-3>", self.on_tree_right_click)
+    def _radio_row(self, layout, options, current):
+        group = []
+        for val, lab in options:
+            rb = QRadioButton(lab)
+            rb.setProperty("value", val)
+            # 先设初值再连接信号：避免 setChecked(True) 在构造期触发
+            # on_settings_changed（此时 self.dt_group 尚未赋值 → AttributeError）
+            if val == current:
+                rb.setChecked(True)
+            rb.toggled.connect(self.on_settings_changed)
+            layout.addWidget(rb)
+            group.append(rb)
+        layout.addStretch(1)
+        return group
 
-    def _build_log_bar(self):
-        bottom = ttk.Frame(self.root)
-        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+    def _group_value(self, group):
+        for rb in group:
+            if rb.isChecked():
+                return rb.property("value")
+        return None
 
-        log_top = ttk.Frame(bottom)
-        log_top.pack(fill=tk.X)
-        ttk.Label(log_top, text="④ 操作日志").pack(side=tk.LEFT)
-        ttk.Button(log_top, text="清空", command=lambda: self.log_text.delete("1.0", tk.END)).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(log_top, text="导出日志", command=self.export_log).pack(side=tk.RIGHT, padx=2)
+    # 右侧结果区
+    def _build_right(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
-        self.log_text = scrolledtext.ScrolledText(bottom, height=7, state=tk.DISABLED)
-        self.log_text.pack(fill=tk.X)
+        ctrl = QHBoxLayout()
+        self.result_stat_label = QLabel("匹配：文件 0 | 文件夹 0 | 总大小 0")
+        self.result_stat_label.setObjectName("successLabel")
+        ctrl.addWidget(self.result_stat_label)
 
-        # 删除执行区
-        del_frame = ttk.Frame(bottom)
-        del_frame.pack(fill=tk.X, pady=(4, 0))
-        self.progress = ttk.Progressbar(del_frame, mode="determinate")
-        self.progress.pack(fill=tk.X, pady=2)
-        self.del_btn = ttk.Button(del_frame, text="执行删除（移至回收站）",
-                                  command=self.start_delete)
-        self.del_btn.pack(side=tk.RIGHT, pady=2)
+        ctrl.addStretch(1)
+        ctrl.addWidget(QLabel("筛选："))
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("按名称/路径过滤")
+        self.filter_edit.setMaximumWidth(180)
+        self.filter_edit.textChanged.connect(self.apply_filter)
+        ctrl.addWidget(self.filter_edit)
+
+        sel_all = QPushButton("全选")
+        sel_none = QPushButton("全不选")
+        sel_all.setObjectName("ghostBtn")
+        sel_none.setObjectName("ghostBtn")
+        sel_all.clicked.connect(self.select_all)
+        sel_none.clicked.connect(self.select_none)
+        ctrl.addWidget(sel_all)
+        ctrl.addWidget(sel_none)
+        layout.addLayout(ctrl)
+
+        self.table = QTableWidget(0, 8)
+        self.table.setObjectName("resultTable")
+        headers = ["选择", "#", "类型", "名称", "完整路径", "大小", "修改时间", "匹配条目"]
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(True)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        self.table.itemChanged.connect(self.on_item_changed)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.on_table_context_menu)
+        layout.addWidget(self.table, 1)
+        return widget
+
+    # 底部日志 + 进度 + 删除
+    def _build_bottom(self, parent_layout):
+        bottom = QVBoxLayout()
+        bottom.setSpacing(6)
+
+        log_top = QHBoxLayout()
+        log_top.addWidget(QLabel("④ 操作日志"))
+        log_top.addStretch(1)
+        clear_log = QPushButton("清空")
+        export_log = QPushButton("导出日志")
+        clear_log.setObjectName("ghostBtn")
+        export_log.setObjectName("ghostBtn")
+        clear_log.clicked.connect(lambda: self.log_view.clear())
+        export_log.clicked.connect(self.export_log)
+        log_top.addWidget(clear_log)
+        log_top.addWidget(export_log)
+        bottom.addLayout(log_top)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumHeight(130)
+        bottom.addWidget(self.log_view)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)  # 默认无限（扫描时显示忙碌）
+        bottom.addWidget(self.progress)
+
+        del_row = QHBoxLayout()
+        del_row.addStretch(1)
+        self.del_btn = QPushButton("执行删除（移至回收站）")
+        self.del_btn.setObjectName("dangerBtn")
+        self.del_btn.setEnabled(False)
+        self.del_btn.clicked.connect(self.start_delete)
+        del_row.addWidget(self.del_btn)
+        bottom.addLayout(del_row)
+
+        parent_layout.addLayout(bottom)
 
     # ---------------- 配置恢复 ----------------
     def _restore_config(self):
         p = self.cfg.get("last_excel_path", "")
         if p and os.path.isfile(p):
-            self.excel_path_var.set(p)
+            self.excel_path_edit.setText(p)
             self.load_excel_file(p, silent=True)
         for tp in self.cfg.get("last_target_paths", []):
             if tp and os.path.isdir(tp):
                 self.target_paths.append(tp)
-                self.path_listbox.insert(tk.END, tp)
+                self.path_list.addItem(tp)
 
     # ---------------- Excel 相关 ----------------
     def browse_excel(self):
-        path = filedialog.askopenfilename(
-            title="选择 Excel 文件",
-            filetypes=[("Excel files", "*.xlsx *.xls"), ("All", "*.*")])
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 Excel 文件", "",
+            "Excel files (*.xlsx *.xls);;All files (*.*)")
         if not path:
             return
-        self.excel_path_var.set(path)
+        self.excel_path_edit.setText(path)
         self.load_excel_file(path)
 
     def load_excel_file(self, path, silent=False):
         if not OPENPYXL_OK and path.lower().endswith(".xlsx"):
-            messagebox.showerror("依赖缺失", "未安装 openpyxl，无法读取 .xlsx 文件。\n请执行：pip install openpyxl")
+            QMessageBox.critical(self, "依赖缺失",
+                                 "未安装 openpyxl，无法读取 .xlsx 文件。\n请执行：pip install openpyxl")
             return
         if not self.excel.open_file(path):
             if not silent:
-                messagebox.showerror("错误", self.excel.last_error)
+                QMessageBox.critical(self, "错误", self.excel.last_error)
             return
-        self.sheet_combo["values"] = self.excel.sheet_names
+        self.sheet_combo.blockSignals(True)
+        self.sheet_combo.clear()
+        self.sheet_combo.addItems(self.excel.sheet_names)
+        self.sheet_combo.blockSignals(False)
         if self.excel.sheet_names:
-            self.sheet_var.set(self.excel.sheet_names[0])
+            self.sheet_combo.setCurrentIndex(0)
             self.on_sheet_changed()
         self.persist_config()
 
     def on_sheet_changed(self):
-        name = self.sheet_var.get()
+        name = self.sheet_combo.currentText()
         if not name:
             return
         headers = self.excel.load_sheet_headers(name)
-        self.col_combo["values"] = headers
+        self.col_combo.blockSignals(True)
+        self.col_combo.clear()
+        self.col_combo.addItems(headers)
+        self.col_combo.blockSignals(False)
         if headers:
-            # 恢复上次列或默认第一列
             idx = self.cfg.get("last_column_index", 0)
             if idx < len(headers):
-                self.col_var.set(headers[idx])
+                self.col_combo.setCurrentIndex(idx)
             else:
-                self.col_var.set(headers[0])
+                self.col_combo.setCurrentIndex(0)
             self.on_column_changed()
 
     def on_column_changed(self):
-        sel = self.col_var.get()
+        sel = self.col_combo.currentText()
         if not sel:
             return
-        # 解析列字母
         letter = sel.split(":")[0].strip()
         idx = col_letter_to_index(letter)
         self.excel.selected_col_index = idx
         self.read_column_data()
 
     def read_column_data(self):
-        sheet = self.sheet_var.get()
+        sheet = self.sheet_combo.currentText()
         idx = self.excel.selected_col_index
         if not sheet or idx is None:
             return
@@ -862,126 +1265,131 @@ class FileJanitorApp:
         self.excel_stats = stats
         self.excel_names = stats["valid"]
         total = len(self.excel_names)
-        self.excel_stat_var.set(
+        self.excel_stat_label.setText(
             f"有效条目: {total} 条（原始 {stats['raw_count']}，空 {stats['empty_count']}，"
             f"重复 {stats['dup_count']}，超长/非法 {stats['skipped_long'] + stats['skipped_illegal']}）")
         if total == 0 and self.excel.last_error:
-            messagebox.showwarning("提示", self.excel.last_error)
+            QMessageBox.warning(self, "提示", self.excel.last_error)
         self.persist_config()
 
     def preview_excel(self):
         if not self.excel_stats.get("preview"):
-            messagebox.showinfo("预览", "请先选择 Excel 并读取列数据。")
+            QMessageBox.information(self, "预览", "请先选择 Excel 并读取列数据。")
             return
-        win = tk.Toplevel(self.root)
-        win.title("Excel 前 20 行预览")
-        win.geometry("400x400")
-        tv = ttk.Treeview(win, columns=("#", "内容"), show="headings")
-        tv.heading("#", text="#")
-        tv.heading("内容", text="内容")
-        tv.column("#", width=40)
-        tv.column("内容", width=340)
-        tv.pack(fill=tk.BOTH, expand=True)
-        for i, v in enumerate(self.excel_stats["preview"], 1):
-            tv.insert("", tk.END, values=(i, v))
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Excel 前 20 行预览")
+        dlg.resize(420, 400)
+        v = QVBoxLayout(dlg)
+        tv = QTableWidget(len(self.excel_stats["preview"]), 2)
+        tv.setHorizontalHeaderLabels(["#", "内容"])
+        tv.verticalHeader().setVisible(False)
+        tv.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        tv.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        tv.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        for i, val in enumerate(self.excel_stats["preview"], 1):
+            tv.setItem(i - 1, 0, QTableWidgetItem(str(i)))
+            tv.setItem(i - 1, 1, QTableWidgetItem(val))
+        v.addWidget(tv)
+        btn = QPushButton("关闭")
+        btn.setObjectName("ghostBtn")
+        btn.clicked.connect(dlg.accept)
+        v.addWidget(btn, 0, Qt.AlignRight)
+        dlg.exec_()
 
     # ---------------- 目标路径 ----------------
     def add_target_path(self):
-        path = filedialog.askdirectory(title="选择目标目录（可多选，重复调用添加）")
+        path = QFileDialog.getExistingDirectory(self, "选择目标目录（可重复添加多个）")
         if not path:
             return
         if is_drive_root(path):
-            if not messagebox.askyesno("高风险警告",
-                                        f"您选择的是磁盘根目录：{path}\n"
-                                        "误删可能导致系统/数据严重损失！\n确认继续？"):
+            ans = QMessageBox.question(
+                self, "高风险警告",
+                f"您选择的是磁盘根目录：{path}\n误删可能导致系统/数据严重损失！\n确认继续？",
+                QMessageBox.Yes | QMessageBox.No)
+            if ans != QMessageBox.Yes:
                 return
         if path not in self.target_paths:
             self.target_paths.append(path)
-            self.path_listbox.insert(tk.END, path)
+            self.path_list.addItem(path)
             self.persist_config()
 
     def remove_target_path(self):
-        sel = self.path_listbox.curselection()
-        if not sel:
+        item = self.path_list.currentItem()
+        if not item:
             return
-        i = sel[0]
-        self.target_paths.pop(i)
-        self.path_listbox.delete(i)
+        path = item.text()
+        if path in self.target_paths:
+            self.target_paths.remove(path)
+        self.path_list.takeItem(self.path_list.row(item))
 
     def clear_target_paths(self):
         self.target_paths.clear()
-        self.path_listbox.delete(0, tk.END)
+        self.path_list.clear()
 
     # ---------------- 设置变更 ----------------
     def on_settings_changed(self):
-        self.delete_type = self.dt_var.get()
-        self.match_mode = self.mm_var.get()
-        self.ignore_case = self.ic_var.get()
-        self.recursive = self.rec_var.get()
-        self.max_depth = self.depth_var.get()
+        if not getattr(self, "_ready", False):
+            return  # 构造期内控件设初值触发的信号，直接忽略
+        self.delete_type = self._group_value(self.dt_group) or "all"
+        self.match_mode = self._group_value(self.mm_group) or "exact"
+        self.ignore_case = self.ic_chk.isChecked()
+        self.recursive = self.rec_chk.isChecked()
+        self.max_depth = self.depth_spin.value()
         self.persist_config()
 
     def persist_config(self):
         cfg = {
-            "last_excel_path": self.excel_path_var.get(),
-            "last_sheet_name": self.sheet_var.get(),
+            "last_excel_path": self.excel_path_edit.text(),
+            "last_sheet_name": self.sheet_combo.currentText(),
             "last_column_index": self.excel.selected_col_index,
             "last_target_paths": self.target_paths,
-            "delete_type": self.dt_var.get(),
-            "match_mode": self.mm_var.get(),
-            "recursive": self.rec_var.get(),
-            "max_depth": self.depth_var.get(),
-            "ignore_case": self.ic_var.get(),
-            "exclude_paths": [x.strip() for x in self.exclude_var.get().split(",") if x.strip()],
-            "whitelist_paths": [x.strip() for x in self.whitelist_var.get().split(",") if x.strip()],
+            "delete_type": self._group_value(self.dt_group) or self.delete_type,
+            "match_mode": self._group_value(self.mm_group) or self.match_mode,
+            "recursive": self.rec_chk.isChecked(),
+            "max_depth": self.depth_spin.value(),
+            "ignore_case": self.ic_chk.isChecked(),
+            "exclude_paths": [x.strip() for x in self.exclude_edit.text().split(",") if x.strip()],
+            "whitelist_paths": [x.strip() for x in self.whitelist_edit.text().split(",") if x.strip()],
         }
         save_config(cfg)
 
     # ---------------- 扫描 ----------------
     def start_scan(self):
         if not self.excel_names:
-            messagebox.showwarning("提示", "Excel 有效条目为 0，无法扫描（请检查数据源）。")
+            QMessageBox.warning(self, "提示", "Excel 有效条目为 0，无法扫描（请检查数据源）。")
             return
         if not self.target_paths:
-            messagebox.showwarning("提示", "请先添加至少一个目标路径。")
+            QMessageBox.warning(self, "提示", "请先添加至少一个目标路径。")
             return
         self.on_settings_changed()
-        self.whitelist = [x.strip() for x in self.whitelist_var.get().split(",") if x.strip()]
-        exclude = [x.strip() for x in self.exclude_var.get().split(",") if x.strip()]
+        self.whitelist = [x.strip() for x in self.whitelist_edit.text().split(",") if x.strip()]
+        exclude = [x.strip() for x in self.exclude_edit.text().split(",") if x.strip()]
 
         self.clear_results()
         self.scan_engine = ScanEngine()
-        self.scan_btn.config(state=tk.DISABLED)
-        self.scan_stop_btn.config(state=tk.NORMAL)
-        self.del_btn.config(state=tk.DISABLED)
+        self.scan_btn.setEnabled(False)
+        self.scan_stop_btn.setEnabled(True)
+        self.del_btn.setEnabled(False)
+        self.progress.setRange(0, 0)  # 忙碌模式
         self.log("INFO", f"开始扫描，目标路径 {len(self.target_paths)} 个，模式 "
                          f"{MATCH_MODE_LABELS.get(self.match_mode)}/{DELETE_TYPE_LABELS.get(self.delete_type)}")
 
-        def worker():
-            scanned, matched = self.scan_engine.scan(
-                names=self.excel_names,
-                target_paths=self.target_paths,
-                delete_type=self.delete_type,
-                match_mode=self.match_mode,
-                ignore_case=self.ignore_case,
-                recursive=self.recursive,
-                max_depth=self.max_depth if self.max_depth > 0 else None,
-                exclude_dirs=exclude,
-                whitelist=self.whitelist,
-                result_queue=self.result_queue,
-                progress_cb=self.on_scan_progress,
-                log_cb=self.log,
-            )
-            self.root.after(0, lambda: self.on_scan_finished(scanned, matched))
+        self.scan_worker = ScanWorker(
+            self.scan_engine, self.excel_names, self.target_paths,
+            self.delete_type, self.match_mode, self.ignore_case,
+            self.recursive, self.max_depth, exclude, self.whitelist)
+        self.scan_worker.result.connect(self.on_result)
+        self.scan_worker.log.connect(lambda lvl, msg: self.log(lvl, msg))
+        self.scan_worker.finished.connect(self.on_scan_finished)
+        self.scan_worker.start()
 
-        self.scan_thread = threading.Thread(target=worker, daemon=True)
-        self.scan_thread.start()
+    def on_result(self, item):
+        self.result_items.append(item)
+        self._insert_row(item)
 
     def on_scan_progress(self, done, matched):
-        # 进度条用匹配数粗略表示（无法预知总数）
-        self.progress["mode"] = "indeterminate"
-        if not self.progress["value"]:
-            self.progress.start(10)
+        # 进度无法预知总数，保持忙碌模式即可
+        pass
 
     def stop_scan(self):
         if self.scan_engine:
@@ -989,172 +1397,150 @@ class FileJanitorApp:
         self.log("INFO", "已请求取消扫描…")
 
     def on_scan_finished(self, scanned, matched):
-        self.scan_btn.config(state=tk.NORMAL)
-        self.scan_stop_btn.config(state=tk.DISABLED)
-        self.progress.stop()
-        self.progress["value"] = 0
+        self.scan_btn.setEnabled(True)
+        self.scan_stop_btn.setEnabled(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
         if self.scan_engine and self.scan_engine.stop_flag:
             self.log("INFO", f"扫描已取消。已匹配 {len(self.result_items)} 项。")
         else:
             self.log("INFO", f"扫描完成，扫描 {scanned} 项，匹配 {matched} 项。")
         self.update_result_stats()
         if self.result_items:
-            self.del_btn.config(state=tk.NORMAL)
-
-    def _start_drain(self):
-        def drain():
-            try:
-                batch = []
-                while True:
-                    item = self.result_queue.get_nowait()
-                    batch.append(item)
-                    if len(batch) >= 200:
-                        break
-                if batch:
-                    self._insert_results(batch)
-            except Empty:
-                pass
-            self.after_id_drain = self.root.after(120, drain)
-        self.after_id_drain = self.root.after(120, drain)
-
-    def _insert_results(self, items):
-        for it in items:
-            self.result_items.append(it)
-            self.checked.add(it["path"])  # 默认全选
-            self.tree.insert("", tk.END, values=(
-                CHECKED,
-                len(self.result_items),
-                "文件夹" if it["is_dir"] else "文件",
-                it["name"],
-                it["path"],
-                fmt_size(it["size"]),
-                it["mtime"],
-                it["matched"],
-            ))
-        self.update_result_stats()
+            self.del_btn.setEnabled(True)
 
     # ---------------- 结果表格操作 ----------------
+    def _insert_row(self, it):
+        self._loading = True
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        cb = QTableWidgetItem()
+        cb.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+        cb.setCheckState(Qt.Checked)
+        cb.setData(Qt.UserRole, it)
+        self.table.setItem(row, 0, cb)
+        self.checked.add(it["path"])
+        self.table.setItem(row, 1, NumericItem(str(len(self.result_items)), len(self.result_items)))
+        self.table.setItem(row, 2, QTableWidgetItem("文件夹" if it["is_dir"] else "文件"))
+        self.table.setItem(row, 3, QTableWidgetItem(it["name"]))
+        self.table.setItem(row, 4, QTableWidgetItem(it["path"]))
+        self.table.setItem(row, 5, NumericItem(fmt_size(it["size"]), it["size"] or -1))
+        self.table.setItem(row, 6, QTableWidgetItem(it["mtime"]))
+        self.table.setItem(row, 7, QTableWidgetItem(it["matched"]))
+        self._loading = False
+        self.update_result_stats()
+
+    def _rebuild_table(self):
+        """依据 self.result_items + self.checked + 筛选关键字重建表格"""
+        kw = self.filter_edit.text().strip().lower()
+        self._loading = True
+        self.table.setRowCount(0)
+        for idx, it in enumerate(self.result_items, 1):
+            if kw:
+                text = " ".join([it["name"], it["path"], it["matched"]]).lower()
+                if kw not in text:
+                    continue
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            cb = QTableWidgetItem()
+            cb.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            cb.setCheckState(Qt.Checked if it["path"] in self.checked else Qt.Unchecked)
+            cb.setData(Qt.UserRole, it)
+            self.table.setItem(row, 0, cb)
+            self.table.setItem(row, 1, NumericItem(str(idx), idx))
+            self.table.setItem(row, 2, QTableWidgetItem("文件夹" if it["is_dir"] else "文件"))
+            self.table.setItem(row, 3, QTableWidgetItem(it["name"]))
+            self.table.setItem(row, 4, QTableWidgetItem(it["path"]))
+            self.table.setItem(row, 5, NumericItem(fmt_size(it["size"]), it["size"] or -1))
+            self.table.setItem(row, 6, QTableWidgetItem(it["mtime"]))
+            self.table.setItem(row, 7, QTableWidgetItem(it["matched"]))
+        self._loading = False
+
     def update_result_stats(self):
         files = sum(1 for it in self.result_items if not it["is_dir"])
         folders = sum(1 for it in self.result_items if it["is_dir"])
         total = sum((it["size"] or 0) for it in self.result_items if it["size"])
-        self.result_stat_var.set(
+        self.result_stat_label.setText(
             f"匹配：文件 {files} | 文件夹 {folders} | 总大小 {fmt_size(total)}")
 
     def select_all(self):
         for it in self.result_items:
             self.checked.add(it["path"])
-        self.rebuild_tree()
+        self._rebuild_table()
 
     def select_none(self):
         self.checked.clear()
-        self.rebuild_tree()
+        self._rebuild_table()
 
-    def on_tree_click(self, event):
-        region = self.tree.identify_region(event.x, event.y)
-        col = self.tree.identify_column(event.x)
-        row = self.tree.identify_row(event.y)
-        if region == "cell" and col == "#1" and row:
-            path = self.tree.item(row, "values")[4]
-            checked = path in self.checked
-            if checked:
-                self.checked.discard(path)
-            else:
-                self.checked.add(path)
-            vals = list(self.tree.item(row, "values"))
-            vals[0] = UNCHECKED if checked else CHECKED
-            self.tree.item(row, values=vals)
-            return "break"
+    def on_item_changed(self, item):
+        if self._loading:
+            return
+        if item.column() != 0:
+            return
+        it = item.data(Qt.UserRole)
+        if it is None:
+            return
+        if item.checkState() == Qt.Checked:
+            self.checked.add(it["path"])
+        else:
+            self.checked.discard(it["path"])
 
-    def rebuild_tree(self):
-        """依据 self.result_items + self.checked + 筛选关键字重建表格"""
-        kw = self.filter_var.get().strip().lower()
-        self.tree.delete(*self.tree.get_children())
-        idx = 0
-        for it in self.result_items:
-            if kw:
-                text = " ".join([it["name"], it["path"], it["matched"]]).lower()
-                if kw not in text:
-                    continue
-            idx += 1
-            self.tree.insert("", tk.END, values=(
-                CHECKED if it["path"] in self.checked else UNCHECKED,
-                idx,
-                "文件夹" if it["is_dir"] else "文件",
-                it["name"],
-                it["path"],
-                fmt_size(it["size"]),
-                it["mtime"],
-                it["matched"],
-            ))
-
-    def on_tree_right_click(self, event):
-        row = self.tree.identify_row(event.y)
-        if row:
-            self.tree.selection_set(row)
-            self.ctx_menu.post(event.x_root, event.y_root)
+    def on_table_context_menu(self, pos):
+        row = self.table.indexAt(pos).row()
+        if row < 0:
+            return
+        menu = QMenu(self)
+        act_open = QAction("打开所在文件夹", self)
+        act_copy = QAction("复制路径", self)
+        act_excl = QAction("排除此项", self)
+        act_open.triggered.connect(self.ctx_open_folder)
+        act_copy.triggered.connect(self.ctx_copy_path)
+        act_excl.triggered.connect(self.ctx_exclude)
+        menu.addAction(act_open)
+        menu.addAction(act_copy)
+        menu.addAction(act_excl)
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
 
     def ctx_open_folder(self):
-        sel = self.tree.selection()
-        if not sel:
+        row = self.table.currentRow()
+        if row < 0:
             return
-        path = self.tree.item(sel[0], "values")[4]
+        path = self.table.item(row, 4).text()
         folder = os.path.dirname(path)
-        try:
-            os.startfile(folder)
-        except Exception as e:
-            messagebox.showerror("错误", str(e))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def ctx_copy_path(self):
-        sel = self.tree.selection()
-        if not sel:
+        row = self.table.currentRow()
+        if row < 0:
             return
-        path = self.tree.item(sel[0], "values")[4]
-        self.root.clipboard_clear()
-        self.root.clipboard_append(path)
+        path = self.table.item(row, 4).text()
+        QApplication.clipboard().setText(path)
 
     def ctx_exclude(self):
-        sel = self.tree.selection()
-        if not sel:
+        row = self.table.currentRow()
+        if row < 0:
             return
-        path = self.tree.item(sel[0], "values")[4]
+        path = self.table.item(row, 4).text()
         folder = os.path.dirname(path)
-        # 将父目录加入白名单
-        self.whitelist.append(folder)
-        self.whitelist = list(dict.fromkeys(self.whitelist))
-        self.whitelist_var.set(",".join(self.whitelist))
-        self.persist_config()
-        # 同步 result_items 与勾选
+        if folder not in self.whitelist:
+            self.whitelist.append(folder)
+            self.whitelist = list(dict.fromkeys(self.whitelist))
+            self.whitelist_edit.setText(",".join(self.whitelist))
+            self.persist_config()
         self.result_items = [it for it in self.result_items if it["path"] != path]
         self.checked.discard(path)
-        self.rebuild_tree()
+        self._rebuild_table()
         self.update_result_stats()
         self.log("INFO", f"已排除并加入白名单：{folder}")
 
-    def apply_filter(self, *args):
-        self.rebuild_tree()
-
-    def sort_by_column(self, col):
-        items = [(self.tree.set(k, col), k) for k in self.tree.get_children("")]
-        if col == "大小":
-            def keyf(x):
-                try:
-                    return float(str(x[0]).replace(" B", "").replace(" KB", "").replace(" MB", "").replace(" GB", "").replace(" TB", "").replace("—", "0").split(" ")[0]) if x[0] != "—" else 0
-                except Exception:
-                    return 0
-            items.sort(key=keyf)
-        elif col == "#":
-            items.sort(key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0)
-        else:
-            items.sort(key=lambda x: str(x[0]).lower())
-        for idx, (_, k) in enumerate(items):
-            self.tree.move(k, "", idx)
+    def apply_filter(self, *_):
+        self._rebuild_table()
 
     def clear_results(self):
-        self.tree.delete(*self.tree.get_children())
+        self.table.setRowCount(0)
         self.result_items = []
         self.checked.clear()
-        self.result_stat_var.set("匹配：文件 0 | 文件夹 0 | 总大小 0")
+        self.update_result_stats()
 
     # ---------------- 删除执行 ----------------
     def get_selected_items(self):
@@ -1163,53 +1549,42 @@ class FileJanitorApp:
     def start_delete(self):
         items = self.get_selected_items()
         if not items:
-            messagebox.showinfo("提示", "请先勾选要删除的项。")
+            QMessageBox.information(self, "提示", "请先勾选要删除的项。")
             return
         files = sum(1 for it in items if not it["is_dir"])
         folders = sum(1 for it in items if it["is_dir"])
         total = sum((it["size"] or 0) for it in items if it["size"])
-        # 二次确认对话框
-        confirm = self.show_confirm_dialog(files, folders, total)
-        if not confirm:
+        if not self.show_confirm_dialog(files, folders, total):
             return
 
         self.delete_log = []
         self.delete_engine = DeleteEngine()
-        self.del_btn.config(state=tk.DISABLED)
-        self.progress["mode"] = "determinate"
-        self.progress["value"] = 0
+        self.del_btn.setEnabled(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
         self.log("INFO", f"开始执行删除，共 {len(items)} 项（移至回收站）。")
 
-        def worker():
-            start = time.time()
-            report = self.delete_engine.delete_items(
-                items=items,
-                whitelist=self.whitelist,
-                progress_cb=lambda d, t: self.root.after(0, lambda: self.on_delete_progress(d, t)),
-                item_cb=lambda r: self.root.after(0, lambda: self.on_delete_item(r)),
-                log_cb=self.log,
-            )
-            elapsed = time.time() - start
-            self.root.after(0, lambda: self.on_delete_finished(report, elapsed))
-
-        self.delete_thread = threading.Thread(target=worker, daemon=True)
-        self.delete_thread.start()
+        self.delete_worker = DeleteWorker(self.delete_engine, items, self.whitelist)
+        self.delete_worker.progress.connect(self.on_delete_progress)
+        self.delete_worker.item.connect(self.on_delete_item)
+        self.delete_worker.log.connect(lambda lvl, msg: self.log(lvl, msg))
+        self.delete_worker.finished.connect(self.on_delete_finished)
+        self.delete_worker.start()
 
     def on_delete_progress(self, done, total):
         if total > 0:
-            self.progress["value"] = int(done / total * 100)
-            self.progress.update()
+            self.progress.setValue(int(done / total * 100))
 
     def on_delete_item(self, rec):
         self.delete_log.append(rec)
         self.result_items = [it for it in self.result_items if it["path"] != rec["path"]]
         self.checked.discard(rec["path"])
-        self.rebuild_tree()
+        self._rebuild_table()
         self.update_result_stats()
 
     def on_delete_finished(self, report, elapsed):
-        self.del_btn.config(state=tk.NORMAL if self.result_items else tk.DISABLED)
-        self.progress["value"] = 100
+        self.del_btn.setEnabled(bool(self.result_items))
+        self.progress.setValue(100)
         self.log("INFO", f"删除完成：成功 {report['success']}，失败 {report['failed']}，"
                          f"跳过 {report['skipped']}，释放 {fmt_size(report['freed'])}，"
                          f"耗时 {int(elapsed)} 秒。")
@@ -1217,108 +1592,106 @@ class FileJanitorApp:
 
     # ---------------- 对话框 ----------------
     def show_confirm_dialog(self, files, folders, total):
-        win = tk.Toplevel(self.root)
-        win.title("⚠ 确认删除")
-        win.geometry("400x300")
-        win.resizable(False, False)
-        win.transient(self.root)
-        win.grab_set()
-        result = {"ok": False}
+        dlg = QDialog(self)
+        dlg.setWindowTitle("确认删除")
+        dlg.setModal(True)
+        v = QVBoxLayout(dlg)
+        v.setSpacing(10)
+        v.addWidget(QLabel("即将把以下内容删除到回收站（可恢复）："))
+        info = QLabel(f"· 文件：{files} 个\n· 文件夹：{folders} 个\n· 总大小：{fmt_size(total)}")
+        v.addWidget(info)
 
-        ttk.Label(win, text="即将删除以下内容到回收站：", font=("Microsoft YaHei", 11)).pack(pady=(12, 6))
-        info = tk.StringVar(value=f"· 文件：{files} 个\n· 文件夹：{folders} 个\n· 总大小：{fmt_size(total)}")
-        ttk.Label(win, textvariable=info, justify=tk.LEFT).pack(padx=20, anchor=tk.W)
-        ttk.Label(win, text="删除后可通过系统回收站恢复。", foreground="gray").pack(padx=20, pady=(6, 0))
+        ack = QCheckBox("我已确认以上内容无误")
+        v.addWidget(ack)
 
-        ack_var = tk.BooleanVar(value=False)
-        ack = ttk.Checkbutton(win, text="我已确认以上内容无误", variable=ack_var)
-        ack.pack(padx=20, pady=(10, 0))
-
-        def do_cancel():
-            result["ok"] = False
-            win.destroy()
-
-        def do_confirm():
-            if ack_var.get():
-                result["ok"] = True
-                win.destroy()
-
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
-        ttk.Button(btn_frame, text="取消", command=do_cancel).pack(side=tk.RIGHT, padx=10)
-        confirm_btn = ttk.Button(btn_frame, text="确认删除", command=do_confirm, state=tk.DISABLED)
-        confirm_btn.pack(side=tk.RIGHT, padx=10)
-
-        def on_ack(*a):
-            confirm_btn.config(state=tk.NORMAL if ack_var.get() else tk.DISABLED)
-        ack_var.trace_add("write", on_ack)
-
-        win.wait_window()
-        return result["ok"]
+        btns = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        ok_btn = btns.button(QDialogButtonBox.Ok)
+        ok_btn.setText("确认删除")
+        ok_btn.setEnabled(False)
+        btns.button(QDialogButtonBox.Cancel).setText("取消")
+        ack.stateChanged.connect(
+            lambda s: ok_btn.setEnabled(s == Qt.Checked))
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        v.addWidget(btns)
+        return dlg.exec_() == QDialog.Accepted
 
     def show_report_dialog(self, report, elapsed):
-        win = tk.Toplevel(self.root)
-        win.title("✓ 删除完成")
-        win.geometry("460x360")
-        win.transient(self.root)
-        win.grab_set()
-
-        ttk.Label(win, text="✓ 删除完成", font=("Microsoft YaHei", 14, "bold")).pack(pady=(12, 6))
+        dlg = QDialog(self)
+        dlg.setWindowTitle("删除完成")
+        dlg.setModal(True)
+        v = QVBoxLayout(dlg)
+        v.setSpacing(10)
+        title = QLabel("✓ 删除完成")
+        title.setStyleSheet("font-size:14px; font-weight:700; color:#1f9d55;")
+        v.addWidget(title)
         text = (f"成功删除：{report['success']} 项\n"
                 f"删除失败：{report['failed']} 项\n"
                 f"跳过：{report['skipped']} 项\n"
                 f"释放空间：{fmt_size(report['freed'])}\n"
                 f"耗时：{int(elapsed)} 秒")
-        ttk.Label(win, text=text, justify=tk.LEFT).pack(padx=20, anchor=tk.W)
+        v.addWidget(QLabel(text))
 
         fails = [r for r in self.delete_log if r["result"] == "failed"]
         if fails:
-            ttk.Label(win, text="失败详情：", foreground="red").pack(anchor=tk.W, padx=20, pady=(6, 0))
-            lb = tk.Listbox(win, height=6)
+            fl = QLabel("失败详情：")
+            fl.setStyleSheet("color:#c0392b;")
+            v.addWidget(fl)
+            lb = QListWidget()
+            lb.setMaximumHeight(120)
             for r in fails:
-                lb.insert(tk.END, f"· {r['path']}（{r['error']}）")
-            lb.pack(fill=tk.X, padx=20, pady=2)
+                lb.addItem(f"· {r['path']}（{r['error']}）")
+            v.addWidget(lb)
 
-        ttk.Label(win, text="所有删除的文件可在系统回收站中恢复。", foreground="gray").pack(padx=20, pady=6)
+        note = QLabel("所有删除的文件可在系统回收站中恢复。")
+        note.setStyleSheet("color:#888;")
+        v.addWidget(note)
 
-        btn = ttk.Frame(win)
-        btn.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
-        ttk.Button(btn, text="导出日志", command=self.export_log).pack(side=tk.RIGHT, padx=8)
-        ttk.Button(btn, text="打开回收站",
-                   command=lambda: self.open_recycle_bin()).pack(side=tk.RIGHT, padx=8)
-        ttk.Button(btn, text="关闭", command=win.destroy).pack(side=tk.RIGHT, padx=8)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        export_btn = QPushButton("导出日志")
+        open_btn = QPushButton("打开回收站")
+        close_btn = QPushButton("关闭")
+        export_btn.setObjectName("ghostBtn")
+        open_btn.setObjectName("ghostBtn")
+        close_btn.setObjectName("accentBtnSmall")
+        export_btn.clicked.connect(self.export_log)
+        open_btn.clicked.connect(self.open_recycle_bin)
+        close_btn.clicked.connect(dlg.accept)
+        btns.addWidget(export_btn)
+        btns.addWidget(open_btn)
+        btns.addWidget(close_btn)
+        v.addLayout(btns)
+        dlg.exec_()
 
     def open_recycle_bin(self):
-        try:
-            os.startfile("explorer.exe", "::{645FF040-5081-101B-9F08-00AA002F954E}")
-        except Exception:
-            try:
-                os.startfile("shell:RecycleBinFolder")
-            except Exception:
-                pass
+        QDesktopServices.openUrl(QUrl("shell:RecycleBinFolder"))
 
     # ---------------- 日志 ----------------
     def log(self, level, msg):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{ts}] [{level}] {msg}\n"
-        self.log_text.configure(state=tk.NORMAL)
-        self.log_text.insert(tk.END, line)
-        self.log_text.configure(state=tk.DISABLED)
-        self.log_text.see(tk.END)
+        color = {"INFO": "#41504a", "WARN": "#d97706",
+                 "SUCCESS": "#1f9d55", "ERROR": "#dc2626"}.get(level, "#41504a")
+        cursor = self.log_view.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(color))
+        cursor.setCharFormat(fmt)
+        cursor.insertText(f"[{ts}] [{level}] {msg}\n")
+        self.log_view.setTextCursor(cursor)
 
     def export_log(self):
         if not self.delete_log:
-            messagebox.showinfo("提示", "暂无删除日志可导出。")
+            QMessageBox.information(self, "提示", "暂无删除日志可导出。")
             return
-        path = filedialog.asksaveasfilename(
-            title="导出日志",
-            defaultextension=".txt",
-            filetypes=[("文本文件", "*.txt"), ("Excel", "*.xlsx")])
+        path, sel = QFileDialog.getSaveFileName(
+            self, "导出日志", "delete_log.txt",
+            "文本文件 (*.txt);;Excel (*.xlsx)")
         if not path:
             return
         if path.lower().endswith(".xlsx"):
             if not OPENPYXL_OK:
-                messagebox.showerror("错误", "需要 openpyxl 才能导出 xlsx")
+                QMessageBox.critical(self, "错误", "需要 openpyxl 才能导出 xlsx")
                 return
             wb = openpyxl.Workbook()
             ws = wb.active
@@ -1336,7 +1709,7 @@ class FileJanitorApp:
                 for i, r in enumerate(self.delete_log, 1):
                     f.write(f"{i}\t{r['type']}\t{r['path']}\t{fmt_size(r['size'])}\t"
                             f"{r['result']}\t{r['error']}\n")
-        messagebox.showinfo("完成", f"日志已导出：{path}")
+        QMessageBox.information(self, "完成", f"日志已导出：{path}")
 
     # ---------------- 帮助/关于 ----------------
     def show_help(self):
@@ -1349,10 +1722,10 @@ class FileJanitorApp:
             "5. 点击「执行删除」，确认后移至回收站（可恢复）。\n\n"
             "安全机制：系统目录保护、白名单、二次确认、回收站恢复、全量日志。"
         )
-        messagebox.showinfo("帮助", txt)
+        QMessageBox.information(self, "帮助", txt)
 
     def show_about(self):
-        messagebox.showinfo("关于",
+        QMessageBox.information(self, "关于",
             f"{APP_NAME}\n版本 {APP_VERSION}\n\n"
             "Excel 清单驱动的批量文件清理工具。\n"
             "删除到回收站，安全可恢复。\n\n"
@@ -1360,19 +1733,50 @@ class FileJanitorApp:
 
 
 # ==================== 程序入口 ====================
+def _report_error(text):
+    """把运行错误同时写日志并弹窗，避免『直接失败』却看不到原因。"""
+    try:
+        _log = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "file_janitor_error.log")
+        with open(_log, "a", encoding="utf-8") as f:
+            f.write("==== %s ====\n%s\n" % (datetime.now().isoformat(), text))
+    except Exception:
+        pass
+    try:
+        import ctypes
+        if sys.platform == "win32":
+            ctypes.windll.user32.MessageBoxW(0, text,
+                                             "文件清理助手 - 运行错误", 0x10)
+        else:
+            print(text)
+    except Exception:
+        print(text)
+
+
 def main():
     """百宝箱入口函数"""
     if not OPENPYXL_OK:
         print("警告: openpyxl 未安装，无法读取 .xlsx（pip install openpyxl）")
     if not SEND2TRASH_OK:
         print("警告: send2trash 未安装，删除将不可恢复（pip install send2trash）")
-    root = tk.Tk()
+    if not XLRD_OK:
+        print("提示: xlrd 未安装，无法读取 .xls（.xlsx 不受影响）")
+
+    # 事件循环内的未捕获异常也写入日志并弹窗
+    sys.excepthook = lambda et, ex, tb: _report_error(
+        "".join(traceback.format_exception(et, ex, tb)))
+
     try:
-        root.iconbitmap()
+        app = QApplication.instance() or QApplication(sys.argv)
+        app.setStyle("Fusion")
+        app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        window = FileJanitorApp()
+        window.show()
+        sys.exit(app.exec_())
     except Exception:
-        pass
-    app = FileJanitorApp(root)
-    root.mainloop()
+        _report_error("".join(traceback.format_exception(*sys.exc_info())))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

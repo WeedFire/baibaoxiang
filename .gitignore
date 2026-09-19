@@ -23,3 +23,5 @@ target
 .idea/
 
 python/
+/pyTools/handleFile/test_data/
+/pyTools/handleFile/.pytestdeps/
