@@ -25,6 +25,7 @@ const SCHEMA_SQL: &str = "
         working_directory TEXT DEFAULT '',
         startup_window_style INTEGER NOT NULL DEFAULT 0,
         is_python_script INTEGER NOT NULL DEFAULT 0,
+        launch_kind INTEGER NOT NULL DEFAULT 0,
         python_interpreter_path TEXT DEFAULT '',
         show_console INTEGER NOT NULL DEFAULT 0,
         run_as_admin INTEGER NOT NULL DEFAULT 0,
@@ -62,7 +63,36 @@ const SCHEMA_SQL: &str = "
 
 pub fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(SCHEMA_SQL)?;
+    migrate_schema(conn)?;
     Ok(())
+}
+
+/// 老库升级：`CREATE TABLE IF NOT EXISTS` 不会给已存在的表补列，
+/// 这里按需 ALTER，并保证幂等（单元测试里直接作用于内存库）。
+pub fn migrate_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !has_column(conn, "app_items", "launch_kind")? {
+        conn.execute(
+            "ALTER TABLE app_items ADD COLUMN launch_kind INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        // 旧数据里 is_python_script 就是唯一的种类标志，迁移过来
+        conn.execute(
+            "UPDATE app_items SET launch_kind = 1 WHERE is_python_script = 1",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn get_db_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -119,5 +149,48 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM app_groups", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// 旧版本建的表没有 launch_kind，升级时要补列并把 Python 脚本标成 1。
+    #[test]
+    fn migrates_legacy_table_without_launch_kind() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE app_items (
+                id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                executable_path TEXT NOT NULL,
+                arguments TEXT DEFAULT '',
+                working_directory TEXT DEFAULT '',
+                startup_window_style INTEGER NOT NULL DEFAULT 0,
+                is_python_script INTEGER NOT NULL DEFAULT 0,
+                python_interpreter_path TEXT DEFAULT '',
+                show_console INTEGER NOT NULL DEFAULT 0,
+                run_as_admin INTEGER NOT NULL DEFAULT 0,
+                allow_multiple_instances INTEGER NOT NULL DEFAULT 1,
+                icon_path TEXT DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO app_items (id, group_id, name, executable_path, is_python_script)
+             VALUES ('x', 'default', '脚本', 'a.py', 1)",
+            [],
+        )
+        .unwrap();
+
+        migrate_schema(&conn).unwrap();
+        migrate_schema(&conn).unwrap();
+
+        let kind: i32 = conn
+            .query_row("SELECT launch_kind FROM app_items WHERE id = 'x'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kind, 1);
     }
 }

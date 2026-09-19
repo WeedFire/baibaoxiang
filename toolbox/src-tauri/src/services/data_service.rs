@@ -5,7 +5,7 @@ use uuid::Uuid;
 const APP_COLUMNS: &str = "id, group_id, name, executable_path, arguments, working_directory,
          startup_window_style, is_python_script, python_interpreter_path,
          show_console, run_as_admin, allow_multiple_instances, icon_path,
-         sort_order, created_at, updated_at";
+         sort_order, created_at, updated_at, launch_kind";
 
 fn row_to_app(row: &Row) -> rusqlite::Result<AppItem> {
     Ok(AppItem {
@@ -16,6 +16,7 @@ fn row_to_app(row: &Row) -> rusqlite::Result<AppItem> {
         arguments: opt_string(row.get::<_, Option<String>>(4)?),
         working_directory: opt_string(row.get::<_, Option<String>>(5)?),
         startup_window_style: WindowStyle::from_i32(row.get::<_, i32>(6)?),
+        launch_kind: row.get::<_, i32>(16)?,
         is_python_script: row.get::<_, i32>(7)? == 1,
         python_interpreter_path: opt_string(row.get::<_, Option<String>>(8)?),
         show_console: row.get::<_, i32>(9)? == 1,
@@ -164,8 +165,9 @@ pub fn add_app(conn: &Connection, req: &AddAppRequest) -> Result<AppItem, String
     conn.execute(
         "INSERT INTO app_items (id, group_id, name, executable_path, arguments, working_directory,
          startup_window_style, is_python_script, python_interpreter_path, show_console,
-         run_as_admin, allow_multiple_instances, icon_path, sort_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         run_as_admin, allow_multiple_instances, icon_path, sort_order, created_at, updated_at,
+         launch_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             id,
             req.group_id,
@@ -183,6 +185,7 @@ pub fn add_app(conn: &Connection, req: &AddAppRequest) -> Result<AppItem, String
             sort,
             now,
             now,
+            req.launch_kind,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -204,7 +207,8 @@ pub fn update_app(conn: &Connection, req: &UpdateAppRequest) -> Result<AppItem, 
             "UPDATE app_items SET group_id=?, name=?, executable_path=?, arguments=?,
              working_directory=?, startup_window_style=?, is_python_script=?,
              python_interpreter_path=?, show_console=?, run_as_admin=?,
-             allow_multiple_instances=?, icon_path=?, sort_order=?, updated_at=?
+             allow_multiple_instances=?, icon_path=?, sort_order=?, updated_at=?,
+             launch_kind=?
              WHERE id=?",
             params![
                 req.group_id,
@@ -221,6 +225,7 @@ pub fn update_app(conn: &Connection, req: &UpdateAppRequest) -> Result<AppItem, 
                 req.icon_path.as_deref().unwrap_or(""),
                 req.sort_order,
                 now,
+                req.launch_kind,
                 req.id,
             ],
         )
@@ -333,6 +338,7 @@ mod tests {
             arguments: Some("--x".into()),
             working_directory: None,
             startup_window_style: 0,
+            launch_kind: 0,
             is_python_script: false,
             python_interpreter_path: None,
             show_console: false,
@@ -368,6 +374,7 @@ mod tests {
             arguments: None,
             working_directory: None,
             startup_window_style: 1,
+            launch_kind: 0,
             is_python_script: false,
             python_interpreter_path: None,
             show_console: false,

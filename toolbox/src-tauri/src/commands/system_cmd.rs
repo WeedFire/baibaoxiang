@@ -226,8 +226,8 @@ pub fn import_config(app: AppHandle, config: ConfigExport) -> Result<usize, Stri
             "INSERT OR REPLACE INTO app_items (id, group_id, name, executable_path, arguments,
              working_directory, startup_window_style, is_python_script, python_interpreter_path,
              show_console, run_as_admin, allow_multiple_instances, icon_path, sort_order,
-             created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             created_at, updated_at, launch_kind)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 item.id,
                 group_id,
@@ -245,6 +245,7 @@ pub fn import_config(app: AppHandle, config: ConfigExport) -> Result<usize, Stri
                 item.sort_order,
                 item.created_at,
                 item.updated_at,
+                item.launch_kind,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -276,6 +277,7 @@ mod tests {
             arguments: None,
             working_directory: None,
             startup_window_style: WindowStyle::Normal,
+            launch_kind: 0,
             is_python_script: false,
             python_interpreter_path: None,
             show_console: false,
@@ -305,6 +307,7 @@ mod tests {
                 arguments: None,
                 working_directory: None,
                 startup_window_style: 0,
+                launch_kind: 0,
                 is_python_script: false,
                 python_interpreter_path: None,
                 show_console: false,
@@ -372,6 +375,7 @@ mod tests {
                 arguments: Some(output.to_string_lossy().to_string()),
                 working_directory: None,
                 startup_window_style: 0,
+                launch_kind: 1,
                 is_python_script: true,
                 python_interpreter_path: Some(py.path.clone()),
                 show_console: false,

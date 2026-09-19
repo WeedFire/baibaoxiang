@@ -1,4 +1,4 @@
-use crate::models::{AppItem, LaunchResult, WindowStyle};
+use crate::models::{AppItem, LaunchKind, LaunchResult, WindowStyle};
 use crate::services::python_detector::{apply_console_preference, resolve_interpreter_with_base};
 use crate::utils::args::{quote_arg, split_args};
 use std::path::Path;
@@ -18,11 +18,75 @@ pub fn build_launch_plan(app: &AppItem) -> Result<LaunchPlan, String> {
     build_launch_plan_with_base(app, crate::utils::app_base_dir())
 }
 
+/// 网页类应用：把地址交给系统默认浏览器，不要求是本地文件。
+fn build_web_plan(app: &AppItem) -> Result<LaunchPlan, String> {
+    let raw = app.executable_path.trim();
+    if raw.is_empty() {
+        return Err("未指定网页地址".to_string());
+    }
+    Ok(LaunchPlan {
+        program: normalize_url(raw)?,
+        args: Vec::new(),
+        working_dir: None,
+    })
+}
+
+/// 补全协议头并做基本校验：既接受 `https://a.com`，也接受直接写 `a.com`。
+fn normalize_url(raw: &str) -> Result<String, String> {
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        return Ok(raw.to_string());
+    }
+    // 明显是本地路径时直接报错，避免拼出 https://C:\xxx 这种地址
+    if raw.contains('\\') || Path::new(raw).is_absolute() {
+        return Err(format!("网页地址需要以 http:// 或 https:// 开头：{}", raw));
+    }
+    Ok(format!("https://{}", raw))
+}
+
+/// CMD 命令类应用：交给 cmd.exe，/k 保留窗口、/c 执行完关闭。
+fn build_command_plan(app: &AppItem, base: Option<&Path>) -> Result<LaunchPlan, String> {
+    let command = app.executable_path.trim();
+    if command.is_empty() {
+        return Err("未指定要执行的命令".to_string());
+    }
+
+    let working_dir = app
+        .working_directory
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| crate::utils::resolve_path_with(base, s));
+
+    if let Some(ref dir) = working_dir {
+        if !dir.is_dir() {
+            return Err(format!("工作目录不存在: {}", dir.display()));
+        }
+    }
+
+    Ok(LaunchPlan {
+        program: cmd_exe(),
+        // 最后一项由 `create_process` 用 raw_arg 原样传给 cmd，保留管道/重定向等语法
+        args: vec![
+            if app.show_console { "/k" } else { "/c" }.to_string(),
+            command.to_string(),
+        ],
+        working_dir: working_dir.map(|d| d.to_string_lossy().to_string()),
+    })
+}
+
 /// `build_launch_plan` 的实现，相对路径的根由参数注入以便测试。
 pub fn build_launch_plan_with_base(
     app: &AppItem,
     base: Option<&Path>,
 ) -> Result<LaunchPlan, String> {
+    let kind = LaunchKind::of(app);
+    if let LaunchKind::Web = kind {
+        return build_web_plan(app);
+    }
+    if let LaunchKind::Command = kind {
+        return build_command_plan(app, base);
+    }
+
     let extra_args = split_args(app.arguments.as_deref().unwrap_or(""));
 
     let working_dir = app
@@ -38,7 +102,7 @@ pub fn build_launch_plan_with_base(
         }
     }
 
-    if app.is_python_script {
+    if kind.is_python() {
         let raw_script = app.executable_path.trim();
         if raw_script.is_empty() {
             return Err("未指定 Python 脚本路径".to_string());
@@ -117,9 +181,20 @@ fn cmd_exe() -> String {
 }
 
 pub fn launch_app(app: &AppItem) -> Result<LaunchResult, String> {
+    let kind = LaunchKind::of(app);
     let plan = build_launch_plan(app)?;
 
-    if !app.allow_multiple_instances {
+    // 网页不做进程管理，直接交给系统浏览器
+    if let LaunchKind::Web = kind {
+        open_url(&plan.program)?;
+        return Ok(LaunchResult {
+            ok: true,
+            message: format!("已在浏览器中打开 {}", plan.program),
+        });
+    }
+
+    // CMD 命令跑在共享的 cmd.exe 上，按进程名判断是否重复启动没有意义
+    if !app.allow_multiple_instances && kind != LaunchKind::Command {
         if let Some(name) = Path::new(&plan.program)
             .file_name()
             .and_then(|n| n.to_str())
@@ -154,8 +229,8 @@ pub fn launch_app(app: &AppItem) -> Result<LaunchResult, String> {
             );
         }
 
-        // Python 脚本在不显示控制台时不弹窗
-        let hide_console = !app.show_console && app.is_python_script;
+        // Python 脚本与 CMD 命令在不显示控制台时不弹窗
+        let hide_console = !app.show_console && (app.is_python_script || kind == LaunchKind::Command);
         return create_process(&plan, hide_console);
     }
 
@@ -309,14 +384,21 @@ fn shell_execute(
 
 /// 用系统默认浏览器打开网址（仅 http/https，调用方需先校验）。
 #[cfg(target_os = "windows")]
-pub fn open_url(url: &str) -> Result<(), String> {
+pub fn open_url(raw: &str) -> Result<(), String> {
+    let url = raw.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(format!("只支持打开 http/https 链接：{}", url));
+    }
     // 复用 ShellExecuteW：program 直接传网址即可交给默认浏览器
     const SW_SHOWNORMAL: i32 = 1;
     shell_execute("open", url, &[], None, SW_SHOWNORMAL).map(|_| ())
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn open_url(_url: &str) -> Result<(), String> {
+pub fn open_url(url: &str) -> Result<(), String> {
+    if !(url.trim().starts_with("http://") || url.trim().starts_with("https://")) {
+        return Err("只支持打开 http/https 链接".to_string());
+    }
     Err("当前平台不支持".to_string())
 }
 
@@ -413,6 +495,7 @@ mod tests {
             arguments: None,
             working_directory: None,
             startup_window_style: WindowStyle::Normal,
+            launch_kind: 0,
             is_python_script: false,
             python_interpreter_path: None,
             show_console: false,
@@ -525,6 +608,98 @@ mod tests {
         let plan = build_launch_plan_with_base(&app, Some(dir.path())).unwrap();
         assert_eq!(Path::new(&plan.program), exe);
         assert_eq!(Path::new(plan.working_dir.as_deref().unwrap()), workdir);
+    }
+
+    /// CMD 命令：交给 cmd.exe，不要求它是真实文件。
+    #[test]
+    fn command_plan_uses_cmd_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = make_app();
+        app.launch_kind = LaunchKind::Command as i32;
+        app.executable_path = "ipconfig /all".into();
+        app.working_directory = Some(dir.path().to_string_lossy().to_string());
+
+        let plan = build_launch_plan(&app).unwrap();
+        assert!(plan.program.to_lowercase().ends_with("cmd.exe"));
+        assert_eq!(plan.args, vec!["/c".to_string(), "ipconfig /all".to_string()]);
+        assert_eq!(
+            Path::new(plan.working_dir.as_deref().unwrap()),
+            dir.path()
+        );
+    }
+
+    /// 勾选“显示控制台”时保留窗口（/k），否则执行完关闭（/c）。
+    #[test]
+    fn command_plan_switch_depends_on_console_preference() {
+        let mut app = make_app();
+        app.launch_kind = LaunchKind::Command as i32;
+        app.executable_path = "dir".into();
+
+        assert_eq!(build_launch_plan(&app).unwrap().args[0], "/c");
+
+        app.show_console = true;
+        assert_eq!(build_launch_plan(&app).unwrap().args[0], "/k");
+    }
+
+    #[test]
+    fn command_plan_requires_a_command() {
+        let mut app = make_app();
+        app.launch_kind = LaunchKind::Command as i32;
+        app.executable_path = "   ".into();
+        assert!(build_launch_plan(&app).is_err());
+    }
+
+    /// 网页：地址直接作为目标，不检查本地文件。
+    #[test]
+    fn web_plan_returns_the_url() {
+        let mut app = make_app();
+        app.launch_kind = LaunchKind::Web as i32;
+        app.executable_path = "https://example.com/docs".into();
+
+        let plan = build_launch_plan(&app).unwrap();
+        assert_eq!(plan.program, "https://example.com/docs");
+        assert!(plan.args.is_empty());
+    }
+
+    /// 没写协议头时自动补 https://，本地路径则明确报错。
+    #[test]
+    fn web_plan_normalizes_and_rejects_local_paths() {
+        let mut app = make_app();
+        app.launch_kind = LaunchKind::Web as i32;
+        app.executable_path = "example.com".into();
+        assert_eq!(
+            build_launch_plan(&app).unwrap().program,
+            "https://example.com"
+        );
+
+        app.executable_path = r"C:\tools\app.exe".into();
+        assert!(build_launch_plan(&app).is_err());
+
+        app.executable_path = "  ".into();
+        assert!(build_launch_plan(&app).is_err());
+    }
+
+    /// 端到端：真的通过 cmd 执行一条命令并落盘。
+    #[test]
+    fn launches_a_cmd_command_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out.txt");
+
+        let mut app = make_app();
+        app.launch_kind = LaunchKind::Command as i32;
+        app.executable_path = format!("echo done > \"{}\"", output.display());
+        app.working_directory = Some(dir.path().to_string_lossy().to_string());
+
+        let result = launch_app(&app).unwrap();
+        assert!(result.ok, "{}", result.message);
+
+        for _ in 0..100 {
+            if output.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(output.exists(), "命令没有产生输出文件");
     }
 
     /// 相对路径在程序目录下不存在时应给出解析后的路径，而不是“文件不存在”之外的信息丢失。

@@ -59,6 +59,48 @@ impl<'de> Deserialize<'de> for WindowStyle {
     }
 }
 
+/// 应用的启动方式，与数据库 `launch_kind` 列及前端“类型”下拉框一一对应
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchKind {
+    /// 程序 / 可执行文件 / 批处理（默认）
+    Program = 0,
+    /// Python 脚本，需要解释器
+    Python = 1,
+    /// CMD 命令，交给 cmd.exe 执行
+    Command = 2,
+    /// 网页地址，交给系统默认浏览器打开
+    Web = 3,
+}
+
+impl LaunchKind {
+    pub fn from_i32(v: i32) -> Self {
+        match v {
+            1 => LaunchKind::Python,
+            2 => LaunchKind::Command,
+            3 => LaunchKind::Web,
+            _ => LaunchKind::Program,
+        }
+    }
+
+    /// 取应用的启动方式；老数据只有 `is_python_script` 时用它兜底。
+    pub fn of(app: &AppItem) -> Self {
+        match LaunchKind::from_i32(app.launch_kind) {
+            LaunchKind::Program if app.is_python_script => LaunchKind::Python,
+            other => other,
+        }
+    }
+
+    pub fn is_python(&self) -> bool {
+        matches!(self, LaunchKind::Python)
+    }
+}
+
+impl Default for LaunchKind {
+    fn default() -> Self {
+        LaunchKind::Program
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppItem {
     pub id: String,
@@ -68,6 +110,9 @@ pub struct AppItem {
     pub arguments: Option<String>,
     pub working_directory: Option<String>,
     pub startup_window_style: WindowStyle,
+    /// 启动方式，取值见 [`LaunchKind`]；旧数据缺失时按 0（程序）处理
+    #[serde(default)]
+    pub launch_kind: i32,
     pub is_python_script: bool,
     pub python_interpreter_path: Option<String>,
     pub show_console: bool,
@@ -124,6 +169,9 @@ pub struct AddAppRequest {
     pub arguments: Option<String>,
     pub working_directory: Option<String>,
     pub startup_window_style: i32,
+    /// 启动方式，取值见 [`LaunchKind`]
+    #[serde(default)]
+    pub launch_kind: i32,
     pub is_python_script: bool,
     pub python_interpreter_path: Option<String>,
     pub show_console: bool,
@@ -141,6 +189,9 @@ pub struct UpdateAppRequest {
     pub arguments: Option<String>,
     pub working_directory: Option<String>,
     pub startup_window_style: i32,
+    /// 启动方式，取值见 [`LaunchKind`]
+    #[serde(default)]
+    pub launch_kind: i32,
     pub is_python_script: bool,
     pub python_interpreter_path: Option<String>,
     pub show_console: bool,

@@ -56,12 +56,8 @@ pub fn set_ignored_update_version(app: AppHandle, version: Option<String>) -> Re
     update_service::set_ignored_version(&conn, version.as_deref())
 }
 
-/// 用系统默认浏览器打开网址（仅允许 http/https）。
+/// 用系统默认浏览器打开网址（仅允许 http/https，校验在 `open_url` 内）。
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
-    let url = url.trim();
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err("只支持打开 http/https 链接".to_string());
-    }
-    process_launcher::open_url(url)
+    process_launcher::open_url(&url)
 }

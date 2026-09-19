@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { confirm } from '@tauri-apps/plugin-dialog';
-import { api, iconUrl, type AppItem } from '../lib/tauri';
+import { api, iconUrl, LaunchKind, type AppItem } from '../lib/tauri';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import './AppIcon.css';
 
@@ -20,6 +20,14 @@ export function AppIcon({ app, isLocked, onRefresh, onEdit }: AppIconProps) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const icon = iconUrl(app.icon_path);
+  const kind = app.launch_kind ?? (app.is_python_script ? LaunchKind.Python : LaunchKind.Program);
+  const isPython = kind === LaunchKind.Python;
+  // 网页与命令没有本地文件，不能“打开文件位置”
+  const hasLocalTarget = kind === LaunchKind.Program || isPython;
+  const placeholder =
+    kind === LaunchKind.Web ? '🌐' : kind === LaunchKind.Command ? '💻' : isPython ? '🐍' : '📦';
+  const badge =
+    kind === LaunchKind.Web ? 'WEB' : kind === LaunchKind.Command ? 'CMD' : isPython ? 'PY' : null;
 
   const runLaunch = async (asAdmin: boolean) => {
     if (launchState === 'launching') return;
@@ -85,9 +93,20 @@ export function AppIcon({ app, isLocked, onRefresh, onEdit }: AppIconProps) {
     { label: '启动', icon: '▶️', onClick: handleLaunch },
     { label: '以管理员身份运行', icon: '🛡️', onClick: () => void runLaunch(true) },
     { label: '编辑', icon: '✏️', onClick: onEdit },
-    { label: '打开文件位置', icon: '📂', onClick: () => void handleOpenFolder() },
-    { label: '删除', icon: '🗑️', onClick: () => void handleDelete(), danger: true },
   ];
+  if (hasLocalTarget) {
+    contextItems.push({
+      label: '打开文件位置',
+      icon: '📂',
+      onClick: () => void handleOpenFolder(),
+    });
+  }
+  contextItems.push({
+    label: '删除',
+    icon: '🗑️',
+    onClick: () => void handleDelete(),
+    danger: true,
+  });
 
   const getStateClass = () => {
     switch (launchState) {
@@ -116,9 +135,7 @@ export function AppIcon({ app, isLocked, onRefresh, onEdit }: AppIconProps) {
           {icon ? (
             <img src={icon} alt={app.name} />
           ) : (
-            <div className="app-icon-placeholder">
-              {app.is_python_script ? '🐍' : '📦'}
-            </div>
+            <div className="app-icon-placeholder">{placeholder}</div>
           )}
           {launchState === 'launching' && (
             <div className="app-icon-loading">
@@ -128,7 +145,7 @@ export function AppIcon({ app, isLocked, onRefresh, onEdit }: AppIconProps) {
           {launchState === 'success' && <div className="app-icon-success">✓</div>}
         </div>
         <div className="app-icon-name">{app.name}</div>
-        {app.is_python_script && <div className="app-icon-badge">PY</div>}
+        {badge && <div className="app-icon-badge">{badge}</div>}
 
         {errorMsg && <div className="app-icon-error-tooltip">{errorMsg}</div>}
 

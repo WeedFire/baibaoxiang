@@ -57,6 +57,12 @@ pub fn extract_icon_into(
     file_path: &str,
     interpreter_hint: Option<&str>,
 ) -> Result<Option<String>, String> {
+    // 网页类应用没有本地文件，图标交给前端占位符
+    let trimmed = file_path.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Ok(None);
+    }
+
     // 相对路径按「程序运行目录」解析，绝对路径原样使用
     let path = crate::utils::resolve_path(file_path);
     if !path.exists() {

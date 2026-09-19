@@ -1,6 +1,16 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 /** 与 Rust `models::AppItem` 一一对应 */
+/** 启动方式：与 Rust `LaunchKind` 一一对应 */
+export const LaunchKind = {
+  Program: 0,
+  Python: 1,
+  Command: 2,
+  Web: 3,
+} as const;
+
+export type LaunchKindValue = (typeof LaunchKind)[keyof typeof LaunchKind];
+
 export interface AppItem {
   id: string;
   group_id: string;
@@ -9,6 +19,8 @@ export interface AppItem {
   arguments?: string | null;
   working_directory?: string | null;
   startup_window_style: number;
+  /** 启动方式，取值见 LaunchKind */
+  launch_kind: number;
   is_python_script: boolean;
   python_interpreter_path?: string | null;
   show_console: boolean;

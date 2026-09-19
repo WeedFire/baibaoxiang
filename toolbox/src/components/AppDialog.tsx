@@ -5,6 +5,7 @@ import {
   defaultNameFromPath,
   iconUrl,
   looksLikePythonScript,
+  LaunchKind,
   type AppItem,
   type PathInspection,
   type PythonInstallation,
@@ -25,7 +26,8 @@ interface FormData {
   arguments: string;
   working_directory: string;
   startup_window_style: number;
-  is_python_script: boolean;
+  /** 启动方式，见 LaunchKind */
+  launch_kind: number;
   python_interpreter_path: string;
   show_console: boolean;
   run_as_admin: boolean;
@@ -39,7 +41,7 @@ const defaultForm: FormData = {
   arguments: '',
   working_directory: '',
   startup_window_style: 0,
-  is_python_script: false,
+  launch_kind: LaunchKind.Program,
   python_interpreter_path: '',
   show_console: false,
   run_as_admin: false,
@@ -89,6 +91,34 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
   const [iconPreview, setIconPreview] = useState<string | null>(null);
   const [pathInfo, setPathInfo] = useState<PathInspection | null>(null);
 
+  const kind = form.launch_kind;
+  const isPython = kind === LaunchKind.Python;
+  // 只有“程序/脚本”类才有本地文件可以预览图标、校验是否存在
+  const hasLocalTarget = kind === LaunchKind.Program || isPython;
+
+  const pathLabel =
+    kind === LaunchKind.Web
+      ? '网页地址'
+      : kind === LaunchKind.Command
+        ? '命令'
+        : isPython
+          ? 'Python 脚本'
+          : '路径';
+  const pathPlaceholder =
+    kind === LaunchKind.Web
+      ? 'https://example.com（也可只写 example.com）'
+      : kind === LaunchKind.Command
+        ? 'ipconfig /all'
+        : String.raw`C:\Program Files\App\app.exe 或 pyTools\main.py`;
+  const pathHint =
+    kind === LaunchKind.Web
+      ? '用系统默认浏览器打开；省略协议头时自动按 https 处理'
+      : kind === LaunchKind.Command
+        ? '交给 cmd.exe 执行，支持管道与重定向；勾选「显示控制台」执行完保留窗口'
+        : '支持相对路径，相对程序安装目录解析（如 pyTools\\excel_merge\\run_excel_merge.py）';
+  const pathIcon = kind === LaunchKind.Web ? '🌐' : kind === LaunchKind.Command ? '💻' : '📦';
+  const canBrowseFile = kind === LaunchKind.Program || isPython;
+
   useEffect(() => {
     if (mode === 'edit' && appId) {
       void loadApp(appId);
@@ -105,7 +135,8 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
         arguments: app.arguments ?? '',
         working_directory: app.working_directory ?? '',
         startup_window_style: app.startup_window_style,
-        is_python_script: app.is_python_script,
+        // 老数据可能只有 is_python_script，这里补成 launch_kind
+        launch_kind: app.launch_kind ?? (app.is_python_script ? LaunchKind.Python : LaunchKind.Program),
         python_interpreter_path: app.python_interpreter_path ?? '',
         show_console: app.show_console,
         run_as_admin: app.run_as_admin,
@@ -122,7 +153,7 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
   // 路径变化后解析真实位置（相对路径以程序安装目录为根）并自动预览图标
   useEffect(() => {
     const target = form.executable_path.trim();
-    if (!target) {
+    if (!target || !hasLocalTarget) {
       setPathInfo(null);
       setIconPreview(null);
       return;
@@ -140,7 +171,7 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
         // 统一用解析后的绝对路径取图标，避免后端重复解析
         const icon = await api.extractIcon(
           info.resolved,
-          form.is_python_script ? form.python_interpreter_path : null,
+          isPython ? form.python_interpreter_path : null,
         );
         if (!cancelled) setIconPreview(iconUrl(icon));
       } catch {
@@ -156,7 +187,8 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
     };
   }, [
     form.executable_path,
-    form.is_python_script,
+    hasLocalTarget,
+    isPython,
     form.python_interpreter_path,
   ]);
 
@@ -189,13 +221,16 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
   const handlePathChange = (value: string) => {
     setForm((prev) => {
       const next = { ...prev, executable_path: value };
-      if (looksLikePythonScript(value)) {
+      const trimmed = value.trim();
+      if (/^https?:\/\//i.test(trimmed)) {
+        next.launch_kind = LaunchKind.Web;
+      } else if (looksLikePythonScript(value)) {
         // 不强制打开控制台：GUI 脚本（自带窗口）应保持不勾选，避免弹出命令行页面；
         // 纯命令行脚本可在下方「显示控制台」中手动勾选以查看输出。
-        next.is_python_script = true;
-        if (!prev.name.trim()) {
-          next.name = defaultNameFromPath(value);
-        }
+        next.launch_kind = LaunchKind.Python;
+      }
+      if (!prev.name.trim() && next.launch_kind !== LaunchKind.Command) {
+        next.name = defaultNameFromPath(trimmed);
       }
       return next;
     });
@@ -206,7 +241,7 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
 
   // Python 脚本若未指定解释器，自动选一个可用的
   useEffect(() => {
-    if (!form.is_python_script || form.python_interpreter_path.trim()) return;
+    if (!isPython || form.python_interpreter_path.trim()) return;
     let cancelled = false;
     void (async () => {
       const list = await detectPython(form.executable_path);
@@ -223,7 +258,7 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
     return () => {
       cancelled = true;
     };
-  }, [form.is_python_script, form.executable_path, form.python_interpreter_path, detectPython]);
+  }, [isPython, form.executable_path, form.python_interpreter_path, detectPython]);
 
   const browse = async (
     kind: 'program' | 'python' | 'directory',
@@ -248,7 +283,7 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
     const newErrors: Partial<Record<keyof FormData, string>> = {};
     if (!form.name.trim()) newErrors.name = '请输入应用名称';
     if (!form.executable_path.trim()) newErrors.executable_path = '请输入路径';
-    if (form.is_python_script && !form.python_interpreter_path.trim()) {
+    if (isPython && !form.python_interpreter_path.trim()) {
       newErrors.python_interpreter_path = 'Python 脚本需要指定解释器';
     }
     setErrors(newErrors);
@@ -269,10 +304,9 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
         arguments: form.arguments.trim() || null,
         working_directory: form.working_directory.trim() || null,
         startup_window_style: form.startup_window_style,
-        is_python_script: form.is_python_script,
-        python_interpreter_path: form.is_python_script
-          ? form.python_interpreter_path.trim()
-          : null,
+        launch_kind: kind,
+        is_python_script: isPython,
+        python_interpreter_path: isPython ? form.python_interpreter_path.trim() : null,
         show_console: form.show_console,
         run_as_admin: form.run_as_admin,
         allow_multiple_instances: form.allow_multiple_instances,
@@ -335,28 +369,53 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
           </div>
 
           <div className="form-group">
-            <label htmlFor="path">路径 *</label>
+            <label htmlFor="kind">类型</label>
+            <select
+              id="kind"
+              value={String(kind)}
+              onChange={(e) => {
+                const nextKind = Number(e.target.value);
+                setForm((prev) => ({
+                  ...prev,
+                  launch_kind: nextKind,
+                  // 切到非 Python 类型时清掉解释器，避免留下无效配置
+                  python_interpreter_path:
+                    nextKind === LaunchKind.Python ? prev.python_interpreter_path : '',
+                }));
+              }}
+            >
+              <option value={LaunchKind.Program}>程序 / 可执行文件</option>
+              <option value={LaunchKind.Python}>Python 脚本</option>
+              <option value={LaunchKind.Command}>CMD 命令</option>
+              <option value={LaunchKind.Web}>网页</option>
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="path">{pathLabel} *</label>
             <div className="input-row">
               {iconPreview ? (
                 <img className="input-icon-preview" src={iconPreview} alt="" />
               ) : (
-                <span className="input-icon-preview placeholder">📦</span>
+                <span className="input-icon-preview placeholder">{pathIcon}</span>
               )}
               <input
                 id="path"
                 type="text"
                 value={form.executable_path}
                 onChange={(e) => handlePathChange(e.target.value)}
-                placeholder={String.raw`C:\Program Files\App\app.exe 或 D:\script\main.py`}
+                placeholder={pathPlaceholder}
                 className={errors.executable_path ? 'error' : ''}
               />
-              <button
-                type="button"
-                className="btn-detect"
-                onClick={() => browse('program', handlePathChange)}
-              >
-                浏览
-              </button>
+              {canBrowseFile && (
+                <button
+                  type="button"
+                  className="btn-detect"
+                  onClick={() => browse('program', handlePathChange)}
+                >
+                  浏览
+                </button>
+              )}
             </div>
             {errors.executable_path && (
               <span className="form-error">{errors.executable_path}</span>
@@ -369,9 +428,7 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
                 : (
                     <span className="form-error">路径不存在：{pathInfo.resolved}</span>
                   ))}
-            <span className="form-hint">
-              支持相对路径，相对程序安装目录解析（如 pyTools\excel_merge\run_excel_merge.py）
-            </span>
+            <span className="form-hint">{pathHint}</span>
           </div>
 
           <div className="form-group">
@@ -441,21 +498,7 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
           </div>
 
           <div className="form-checkboxes">
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={form.is_python_script}
-                onChange={(e) => {
-                  updateField('is_python_script', e.target.checked);
-                  // 勾选 Python 脚本时默认不显示控制台（GUI 脚本自带窗口）；
-                  // 命令行脚本可手动勾选下方「显示控制台」。
-                  if (e.target.checked) updateField('show_console', false);
-                }}
-              />
-              <span>Python 脚本</span>
-            </label>
-
-            {form.is_python_script && (
+            {isPython && (
               <div className="form-group nested">
                 <label htmlFor="python">Python 解释器 *</label>
                 <div className="input-row">
@@ -523,34 +566,46 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
               </div>
             )}
 
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={form.run_as_admin}
-                onChange={(e) => updateField('run_as_admin', e.target.checked)}
-              />
-              <span>以管理员身份运行</span>
-            </label>
+            {/* 网页交给浏览器打开，进程相关的选项对它没有意义 */}
+            {kind !== LaunchKind.Web && (
+              <>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={form.run_as_admin}
+                    onChange={(e) => updateField('run_as_admin', e.target.checked)}
+                  />
+                  <span>以管理员身份运行</span>
+                </label>
 
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={form.show_console}
-                onChange={(e) => updateField('show_console', e.target.checked)}
-              />
-              <span>显示控制台（命令行脚本勾选以查看输出；GUI 脚本保持不勾选，否则会多弹一个黑窗）</span>
-            </label>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={form.allow_multiple_instances}
+                    onChange={(e) =>
+                      updateField('allow_multiple_instances', e.target.checked)
+                    }
+                  />
+                  <span>允许多实例（取消后已在运行则不重复启动）</span>
+                </label>
+              </>
+            )}
 
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={form.allow_multiple_instances}
-                onChange={(e) =>
-                  updateField('allow_multiple_instances', e.target.checked)
-                }
-              />
-              <span>允许多实例（取消后已在运行则不重复启动）</span>
-            </label>
+            {/* 只有脚本/命令需要控制台：勾选后执行完保留窗口方便看输出 */}
+            {(isPython || kind === LaunchKind.Command) && (
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={form.show_console}
+                  onChange={(e) => updateField('show_console', e.target.checked)}
+                />
+                <span>
+                  {kind === LaunchKind.Command
+                    ? '保留控制台窗口（执行完不关闭，便于查看输出）'
+                    : '显示控制台（命令行脚本勾选以查看输出；GUI 脚本保持不勾选，否则会多弹一个黑窗）'}
+                </span>
+              </label>
+            )}
           </div>
 
           <div className="dialog-footer">

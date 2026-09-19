@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, iconUrl, type AppItem, type LaunchStats } from '../lib/tauri';
+import { api, iconUrl, LaunchKind, type AppItem, type LaunchStats } from '../lib/tauri';
 import { useAppStore } from '../store/appStore';
 import './Dashboard.css';
 
@@ -87,13 +87,16 @@ export function Dashboard({ onRefresh }: DashboardProps) {
 
   const renderCard = (app: AppItem) => {
     const icon = iconUrl(app.icon_path);
+    const kind = app.launch_kind ?? (app.is_python_script ? LaunchKind.Python : LaunchKind.Program);
+    const placeholder =
+      kind === LaunchKind.Web ? '🌐' : kind === LaunchKind.Command ? '💻' : app.is_python_script ? '🐍' : '📦';
     return (
       <div key={app.id} className="app-card" onClick={() => void handleLaunch(app.id)}>
         <div className="app-card-icon">
           {icon ? (
             <img src={icon} alt={app.name} />
           ) : (
-            <div className="app-card-placeholder">{app.is_python_script ? '🐍' : '📦'}</div>
+            <div className="app-card-placeholder">{placeholder}</div>
           )}
         </div>
         <div className="app-card-info">
