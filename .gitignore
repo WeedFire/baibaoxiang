@@ -27,3 +27,4 @@ python/
 /pyTools/handleFile/.pytestdeps/
 *.log
 /pyTools/handleFile/test_data_smoke/
+/pyTools/handleFile/config.json

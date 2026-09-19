@@ -149,6 +149,27 @@ def normalize_path(p):
     return os.path.normcase(os.path.abspath(p))
 
 
+def to_native_path(p):
+    """把路径归一化为「原生绝对路径」（去掉首尾引号/空白，统一分隔符）。
+
+    背景：send2trash 在 Windows 上会自行给路径拼 ``\\\\?\\`` 长路径前缀，
+    而该前缀只接受全反斜杠的本地绝对路径。Excel 清单里常见 ``D:/temp/x``
+    这类正斜杠写法，拼出来就变成非法的 ``\\\\?\\D:/temp/x``，删除时报
+    ``[Errno 3] 系统找不到指定的路径``。因此凡是要交给系统 API（删除、
+    存在性检查、拼接）的路径，先经过本函数归一化。
+    """
+    p = (p or "").strip().strip('"').strip()
+    if not p:
+        return p
+    try:
+        p = os.path.abspath(p)
+    except Exception:
+        p = os.path.normpath(p)
+    if os.name == "nt":
+        p = p.replace("/", "\\")
+    return p
+
+
 def is_protected_path(path):
     """判断路径是否位于系统保护目录内"""
     ap = normalize_path(path)
@@ -546,7 +567,9 @@ class DeleteEngine:
         for it in items:
             if self.stop_flag:
                 break
-            path = it["path"]
+            # 归一化为原生反斜杠绝对路径：send2trash 会拼 ``\\?\`` 长路径前缀，
+            # 正斜杠混用（如 D:/temp/x）会导致 Errno 3 找不到路径
+            path = to_native_path(it["path"])
             is_dir = it["is_dir"]
             size = it.get("size") or 0
             item_type = "文件夹" if is_dir else "文件"
@@ -1198,6 +1221,7 @@ class FileJanitorApp(QMainWindow):
             self.excel_path_edit.setText(p)
             self.load_excel_file(p, silent=True)
         for tp in self.cfg.get("last_target_paths", []):
+            tp = to_native_path(tp)
             if tp and os.path.isdir(tp):
                 self.target_paths.append(tp)
                 self.path_list.addItem(tp)
@@ -1301,6 +1325,7 @@ class FileJanitorApp(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "选择目标目录（可重复添加多个）")
         if not path:
             return
+        path = to_native_path(path)
         if is_drive_root(path):
             ans = QMessageBox.question(
                 self, "高风险警告",
@@ -1362,6 +1387,8 @@ class FileJanitorApp(QMainWindow):
             QMessageBox.warning(self, "提示", "请先添加至少一个目标路径。")
             return
         self.on_settings_changed()
+        # 统一目标路径写法（正/反斜杠混用会让 send2trash 的 \\?\ 前缀失效）
+        self.target_paths = [to_native_path(p) for p in self.target_paths]
         self.whitelist = [x.strip() for x in self.whitelist_edit.text().split(",") if x.strip()]
         exclude = [x.strip() for x in self.exclude_edit.text().split(",") if x.strip()]
 
@@ -1412,6 +1439,9 @@ class FileJanitorApp(QMainWindow):
     # ---------------- 结果表格操作 ----------------
     def _insert_row(self, it):
         self._loading = True
+        # 排序开启时逐行 setItem 会触发实时重排，导致单元格错位/空行，
+        # 填充期间必须临时关闭排序（_rebuild_table 同理）
+        self.table.setSortingEnabled(False)
         row = self.table.rowCount()
         self.table.insertRow(row)
         cb = QTableWidgetItem()
@@ -1427,6 +1457,7 @@ class FileJanitorApp(QMainWindow):
         self.table.setItem(row, 5, NumericItem(fmt_size(it["size"]), it["size"] or -1))
         self.table.setItem(row, 6, QTableWidgetItem(it["mtime"]))
         self.table.setItem(row, 7, QTableWidgetItem(it["matched"]))
+        self.table.setSortingEnabled(True)
         self._loading = False
         self.update_result_stats()
 
@@ -1434,6 +1465,7 @@ class FileJanitorApp(QMainWindow):
         """依据 self.result_items + self.checked + 筛选关键字重建表格"""
         kw = self.filter_edit.text().strip().lower()
         self._loading = True
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         for idx, it in enumerate(self.result_items, 1):
             if kw:
@@ -1454,6 +1486,7 @@ class FileJanitorApp(QMainWindow):
             self.table.setItem(row, 5, NumericItem(fmt_size(it["size"]), it["size"] or -1))
             self.table.setItem(row, 6, QTableWidgetItem(it["mtime"]))
             self.table.setItem(row, 7, QTableWidgetItem(it["matched"]))
+        self.table.setSortingEnabled(True)
         self._loading = False
 
     def update_result_stats(self):

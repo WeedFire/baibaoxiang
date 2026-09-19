@@ -29,6 +29,47 @@ from file_janitor import (  # noqa: E402
 )
 
 
+# ---------------- 删除路径归一化回归测试 ----------------
+# 回归背景：send2trash(Windows) 会自动给路径拼 `\\?\` 长路径前缀，而该前缀
+# 只接受全反斜杠的本地绝对路径。Excel 里常见 `D:/temp/x` 这种正斜杠写法，
+# 一旦混入就会报 [Errno 3] 系统找不到指定的路径（'\\?\D:/temp/x'）。
+def test_delete_engine_deletes_forward_slash_path():
+    """含正斜杠的路径必须能正常删除（删除前归一化为原生反斜杠路径）。
+
+    注意：不能用 tmp_path（位于 AppData，属系统保护目录会被正确跳过），
+    改用用户主目录下的临时目录。"""
+    from file_janitor import DeleteEngine, is_protected_path, to_native_path
+
+    d = tempfile.mkdtemp(prefix="fj_del_test_", dir=os.path.expanduser("~"))
+    try:
+        f = os.path.join(d, "数据2024.tmp")
+        with open(f, "w", encoding="utf-8") as fp:
+            fp.write("x")
+        mixed = to_native_path(d).replace("\\", "/") + "/数据2024.tmp"
+        assert "/" in mixed and not is_protected_path(mixed)
+
+        eng = DeleteEngine()
+        recs = []
+        eng.delete_items(
+            [{"path": mixed, "is_dir": False, "size": 1}], [],
+            lambda dd, t: None, recs.append, lambda *a: None)
+        assert recs and recs[0]["result"] == "success", recs
+        assert not os.path.exists(f)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_to_native_path_normalizes_separators():
+    """to_native_path 统一为原生反斜杠绝对路径，去掉引号与空白。"""
+    from file_janitor import to_native_path
+
+    if os.name != "nt":
+        pytest.skip("仅 Windows 需要反斜杠归一化")
+    assert to_native_path("D:/temp/test_data") == "D:\\temp\\test_data"
+    assert to_native_path('  "D:/temp/x"  ') == "D:\\temp\\x"
+    assert to_native_path("  D:\\a/b\\c  ") == "D:\\a\\b\\c"
+
+
 # ---------------- GUI 构造回归测试 ----------------
 # 回归背景：_radio_row 曾“先 connect 后 setChecked(True)”，导致构造期
 # toggled 信号回调 on_settings_changed 时 self.dt_group / mm_group 尚未
@@ -48,6 +89,43 @@ def test_main_window_constructs_without_slot_error():
     assert isinstance(w.delete_type, str) and isinstance(w.match_mode, str)
     w.close()
     app.quit()
+
+
+def test_result_table_rows_complete_with_sorting_enabled():
+    """回归：排序开启时逐行 insertRow+setItem 会导致行被实时重排、
+    单元格散乱（表现为表格只剩最后一行有数据）。
+    扫描结果填充期间必须临时关闭排序，填充完成后再恢复。"""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QApplication
+    from file_janitor import FileJanitorApp
+
+    app = QApplication.instance() or QApplication([])
+    w = FileJanitorApp()
+    # 模拟用户点击过表头（排序指示器生效）后逐条接收扫描结果
+    w.table.sortByColumn(0, Qt.AscendingOrder)
+    try:
+        for i in range(5):
+            w.on_result({
+                "path": f"D:/t/item{i}.txt",
+                "name": f"item{i}.txt",
+                "is_dir": False,
+                "size": 10,
+                "mtime": "2026-09-19 10:00:00",
+                "matched": f"数据{i}",
+            })
+        assert w.table.rowCount() == 5
+        for r in range(5):
+            for col, label in ((3, "名称"), (4, "完整路径"), (6, "修改时间")):
+                it = w.table.item(r, col)
+                assert it is not None and it.text(), f"第 {r+1} 行「{label}」列为空"
+                assert it.text() != "", f"第 {r+1} 行「{label}」列为空文本"
+        # 每行路径应互不相同（未发生错位覆盖）
+        paths = {w.table.item(r, 4).text() for r in range(5)}
+        assert len(paths) == 5
+    finally:
+        w.close()
+        app.quit()
 
 
 # ==================== 工具函数 ====================
