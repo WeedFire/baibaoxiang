@@ -123,6 +123,48 @@ export interface UpdateState {
   checked_at: number | null;
 }
 
+/** 插件市场：单个插件（来自后端 `get_marketplace`） */
+export interface MarketplacePlugin {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  author: string;
+  /** python_script / program / dependency */
+  kind: string;
+  download_url: string;
+  icon_url: string | null;
+  entry: string;
+  launch_kind: number;
+  interpreter: string;
+  auto_add: boolean;
+  /** 可选的 Python 版本要求，仅展示用 */
+  python_requirement?: string | null;
+  installed: boolean;
+  installed_version: string | null;
+}
+
+/** 插件安装进度（后端 `marketplace://progress` 事件载荷） */
+export interface MarketplaceProgress {
+  /** downloading / verifying / installing / done */
+  stage: string;
+  downloaded: number;
+  total: number;
+  message: string | null;
+}
+
+/** 插件安装结果（后端 `install_marketplace_plugin` 返回值） */
+export interface MarketplaceInstallResult {
+  installed: boolean;
+  /** 是否自动登记了应用 */
+  added_app: boolean;
+  /** 自动登记的应用 id（未登记时为 null） */
+  app_id: string | null;
+  /** 实际安装目录 */
+  install_dir: string;
+  message: string;
+}
+
 export interface LaunchStats {
   recent: AppItem[];
   frequent: AppItem[];
@@ -219,6 +261,12 @@ export const api = {
   setIgnoredUpdateVersion: (version: string | null) =>
     invoke<void>('set_ignored_update_version', { version }),
   openExternalUrl: (url: string) => invoke<void>('open_external_url', { url }),
+
+  // ---- 插件市场 ----
+  getMarketplace: () => invoke<MarketplacePlugin[]>('get_marketplace'),
+  /** 下载 → 验签 → 安装（进度通过 `marketplace://progress` 事件推送） */
+  installMarketplacePlugin: (pluginId: string) =>
+    invoke<MarketplaceInstallResult>('install_marketplace_plugin', { pluginId }),
 };
 
 /** 订阅更新包下载/安装进度，返回取消订阅函数 */
@@ -227,4 +275,14 @@ export async function listenUpdateProgress(
 ): Promise<UnlistenFn> {
   const { listen } = await import('@tauri-apps/api/event');
   return listen<UpdateProgress>('update://progress', (event) => handler(event.payload));
+}
+
+/** 订阅插件市场下载/安装进度，返回取消订阅函数 */
+export async function listenMarketplaceProgress(
+  handler: (progress: MarketplaceProgress) => void,
+): Promise<UnlistenFn> {
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen<MarketplaceProgress>('marketplace://progress', (event) =>
+    handler(event.payload),
+  );
 }

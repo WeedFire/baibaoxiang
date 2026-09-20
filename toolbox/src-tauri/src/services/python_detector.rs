@@ -44,8 +44,16 @@ pub fn find_bundled_python(roots: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// 检测本机所有可用的 Python 解释器，返回可直接 spawn 的绝对路径。
-/// 内置解释器（若有）始终排在第一位，作为默认选择。
+///
+/// 排序：系统解释器（py 启动器 / 常见目录 / conda / PATH）按版本降序在前，
+/// 随程序安装的内置解释器垫底作为兜底——优先使用用户自己的环境
+/// （装了第三方包），内置副本只在系统没有 Python 时才被选中。
 pub fn detect_python_installations() -> Vec<PythonInstallation> {
+    detect_with_bundled(bundled_python())
+}
+
+/// 同上，但内置解释器路径由参数注入以便测试。
+fn detect_with_bundled(bundled: Option<&Path>) -> Vec<PythonInstallation> {
     let mut found: Vec<PythonInstallation> = Vec::new();
 
     for p in from_py_launcher() {
@@ -68,26 +76,23 @@ pub fn detect_python_installations() -> Vec<PythonInstallation> {
         vb.cmp(&va)
     });
 
-    // 内置解释器不受版本排序影响，始终置顶
-    if let Some(bundled) = bundled_python() {
+    // 内置解释器垫底：仅当系统没有任何解释器时才会被自动选中
+    if let Some(bundled) = bundled {
         let key = path_key(bundled);
         match found.iter().position(|i| path_key(Path::new(&i.path)) == key) {
             Some(index) => {
                 let mut item = found.remove(index);
                 item.source = "bundled".to_string();
                 item.relative_path = bundled_relative_path(bundled);
-                found.insert(0, item);
+                found.push(item);
             }
-            None => found.insert(
-                0,
-                PythonInstallation {
-                    path: bundled.to_string_lossy().to_string(),
-                    version: version_of(bundled),
-                    source: "bundled".to_string(),
-                    is_venv: false,
-                    relative_path: bundled_relative_path(bundled),
-                },
-            ),
+            None => found.push(PythonInstallation {
+                path: bundled.to_string_lossy().to_string(),
+                version: version_of(bundled),
+                source: "bundled".to_string(),
+                is_venv: false,
+                relative_path: bundled_relative_path(bundled),
+            }),
         }
     }
 
@@ -129,17 +134,18 @@ pub fn find_venv_for_script(script_path: &str) -> Option<PythonInstallation> {
 }
 
 /// 决定实际使用的解释器：
-/// 显式配置 > 脚本旁虚拟环境 > 随程序安装的内置解释器 > 系统检测到的第一个 > PATH 上的 python。
+/// 显式配置 > 脚本旁虚拟环境 > 系统检测到的解释器 > 随程序安装的内置解释器 > PATH 上的 python。
 /// 脚本与解释器中的相对路径都以 `base`（「程序运行目录」，一般是安装目录）为根解析。
 pub fn resolve_interpreter_with_base(app: &AppItem, base: Option<&Path>) -> Result<String, String> {
-    resolve_interpreter_in(app, bundled_python(), base)
+    resolve_interpreter_in(app, bundled_python(), base, &detect_python_installations())
 }
 
-/// `resolve_interpreter` 的实现：内置解释器与相对路径的根由参数注入以便测试。
+/// `resolve_interpreter` 的实现：内置解释器、检测列表与相对路径的根由参数注入以便测试。
 fn resolve_interpreter_in(
     app: &AppItem,
     bundled: Option<&Path>,
     base: Option<&Path>,
+    detected: &[PythonInstallation],
 ) -> Result<String, String> {
     if let Some(ref configured) = app.python_interpreter_path {
         let configured = configured.trim();
@@ -171,13 +177,14 @@ fn resolve_interpreter_in(
         return Ok(venv.path);
     }
 
-    // 安装目录下自带的解释器是默认运行环境
-    if let Some(bundled) = bundled {
-        return Ok(bundled.to_string_lossy().to_string());
+    // 用户自己安装的 Python（带第三方包）优先
+    if let Some(first) = detected.first() {
+        return Ok(first.path.clone());
     }
 
-    if let Some(first) = detect_python_installations().into_iter().next() {
-        return Ok(first.path);
+    // 系统没有任何 Python 时，回退到安装目录自带的解释器
+    if let Some(bundled) = bundled {
+        return Ok(bundled.to_string_lossy().to_string());
     }
 
     if version_of_command("python").is_some() {
@@ -583,8 +590,9 @@ mod tests {
         assert!(find_bundled_python(&[dir.path().to_path_buf()]).is_none());
     }
 
+    /// 系统安装的 Python（用户自己的环境）优先于内置解释器。
     #[test]
-    fn bundled_python_wins_over_system_installations() {
+    fn system_python_preferred_over_bundled() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("job.py");
         std::fs::write(&script, b"print(1)").unwrap();
@@ -592,10 +600,69 @@ mod tests {
         std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
         std::fs::write(&bundled, b"").unwrap();
 
-        let resolved =
-            resolve_interpreter_in(&python_script_app(&script), Some(bundled.as_path()), None)
-                .unwrap();
+        let system = PythonInstallation {
+            path: "C:/Python313/python.exe".to_string(),
+            version: Some("3.13.0".to_string()),
+            source: "py-launcher".to_string(),
+            is_venv: false,
+            relative_path: None,
+        };
+        let resolved = resolve_interpreter_in(
+            &python_script_app(&script),
+            Some(bundled.as_path()),
+            None,
+            &[system.clone()],
+        )
+        .unwrap();
+        assert_eq!(resolved, system.path);
+    }
+
+    /// 系统没有任何 Python 时，回退到安装目录自带的解释器。
+    #[test]
+    fn bundled_python_used_when_no_system_python() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("job.py");
+        std::fs::write(&script, b"print(1)").unwrap();
+        let bundled = dir.path().join("python").join("python.exe");
+        std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        std::fs::write(&bundled, b"").unwrap();
+
+        let resolved = resolve_interpreter_in(
+            &python_script_app(&script),
+            Some(bundled.as_path()),
+            None,
+            &[],
+        )
+        .unwrap();
         assert_eq!(resolved, bundled.to_string_lossy());
+    }
+
+    /// 检测列表中内置解释器排在系统解释器之后（下拉框里作兜底选项）。
+    #[test]
+    fn detect_puts_bundled_python_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundled = dir.path().join("python").join("python.exe");
+        std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        std::fs::write(&bundled, b"").unwrap();
+        let system = dir.path().join("system-python.exe");
+        std::fs::write(&system, b"").unwrap();
+
+        let found = detect_with_bundled(Some(bundled.as_path()));
+        // 本机装有系统 Python 时，列表首位应是系统解释器，内置在最后
+        if found.len() > 1 {
+            assert_eq!(
+                found.last().unwrap().path,
+                bundled.to_string_lossy(),
+                "内置解释器应垫底: {:?}",
+                found.iter().map(|i| i.path.clone()).collect::<Vec<_>>()
+            );
+            assert_ne!(found[0].path, bundled.to_string_lossy());
+        } else {
+            // CI 无 Python 时列表只有内置
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].source, "bundled");
+        }
+        let _ = system;
     }
 
     #[test]
@@ -631,7 +698,7 @@ mod tests {
         app.python_interpreter_path = Some(configured.to_string_lossy().to_string());
 
         let resolved =
-            resolve_interpreter_in(&app, Some(bundled.as_path()), None).unwrap();
+            resolve_interpreter_in(&app, Some(bundled.as_path()), None, &[]).unwrap();
         assert_eq!(resolved, configured.to_string_lossy());
     }
 }

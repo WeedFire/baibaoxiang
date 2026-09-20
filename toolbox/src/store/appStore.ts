@@ -3,7 +3,7 @@ import type { AppGroup, AppItem } from '../lib/tauri';
 
 export type { AppGroup, AppItem };
 
-export type TabId = 'dashboard' | 'apps';
+export type TabId = 'dashboard' | 'apps' | 'marketplace';
 
 interface AppState {
   activeTab: TabId;

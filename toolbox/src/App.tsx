@@ -5,6 +5,7 @@ import { Toolbar } from './components/Toolbar';
 import { GroupTabs } from './components/GroupTabs';
 import { LayoutCanvas } from './components/LayoutCanvas';
 import { Dashboard } from './pages/Dashboard';
+import { Marketplace } from './pages/Marketplace';
 import { AppDialog } from './components/AppDialog';
 import { UpdateNotice } from './components/UpdateNotice';
 import { Settings } from './pages/Settings';
@@ -144,6 +145,8 @@ export default function App() {
       )}
       {activeTab === 'dashboard' ? (
         <Dashboard onRefresh={() => void loadData()} />
+      ) : activeTab === 'marketplace' ? (
+        <Marketplace onInstalled={() => void loadData()} />
       ) : (
         <>
           <GroupTabs

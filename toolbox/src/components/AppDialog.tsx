@@ -12,6 +12,7 @@ import {
   type PythonInstallation,
 } from '../lib/tauri';
 import { useAppStore } from '../store/appStore';
+import pythonIcon from '../assets/python.png';
 import './AppDialog.css';
 
 interface AppDialogProps {
@@ -252,7 +253,8 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
     void (async () => {
       const list = await detectPython(form.executable_path);
       if (!cancelled && list.length > 0) {
-        // 内置解释器优先保存成相对写法，换台机器/换安装目录依然可用
+        // 首选：脚本旁 venv > 用户自己的系统解释器 > 内置解释器（兜底）。
+        // 内置解释器保存成相对写法（python\python.exe），换安装目录依然可用
         const preferred = list[0].relative_path || list[0].path;
         setForm((prev) =>
           prev.python_interpreter_path.trim()
@@ -403,6 +405,9 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
             <div className="input-row">
               {iconPreview ? (
                 <img className="input-icon-preview" src={iconPreview} alt="" />
+              ) : isPython ? (
+                // Python 脚本预览兜底用 Python 官方标志
+                <img className="input-icon-preview" src={pythonIcon} alt="" draggable={false} />
               ) : (
                 <span className="input-icon-preview placeholder">{pathIcon}</span>
               )}

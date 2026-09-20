@@ -363,6 +363,124 @@ pub struct UpdateState {
     pub checked_at: Option<i64>,
 }
 
+// ---------------- 插件市场 ----------------
+
+/// 插件种类，对应 `marketplace.json` 里的 `kind` 字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginKind {
+    /// Python 脚本：下载到 `<根>/pyTools/<id>/`，并自动登记为应用
+    PythonScript,
+    /// 程序包（python 运行环境的一部分）：下载到 `<根>/<id>/`，仅放置文件
+    Program,
+    /// 依赖包：下载到 `<根>/python/Lib/site-packages/`，仅放置文件
+    Dependency,
+}
+
+impl PluginKind {
+    /// 中文名，用于前端展示。
+    #[allow(dead_code)]
+    pub fn label(&self) -> &'static str {
+        match self {
+            PluginKind::PythonScript => "Python 脚本",
+            PluginKind::Program => "程序包",
+            PluginKind::Dependency => "依赖包",
+        }
+    }
+}
+
+/// 插件市场清单里的单个插件条目。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MarketplacePlugin {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub author: String,
+    pub kind: PluginKind,
+    pub download_url: String,
+    /// 覆盖归档字节的 ed25519/minisign 签名（base64）；留空表示不校验
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// 可选图标（PNG 地址），下载后作为应用图标
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    /// 归档内的入口文件名（用于自动添加应用）
+    #[serde(default)]
+    pub entry: String,
+    /// 自动添加应用时的启动方式（0 程序 / 1 Python / 2 命令 / 3 网页）
+    #[serde(default)]
+    pub launch_kind: i32,
+    /// Python 类应用的解释器相对路径（如 `python/python.exe`）
+    #[serde(default)]
+    pub interpreter: String,
+    /// 是否自动添加为应用；缺省时仅 Python 脚本自动添加
+    #[serde(default)]
+    pub auto_add: Option<bool>,
+    /// 可选的 Python 版本要求，仅展示用
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub python_requirement: Option<String>,
+}
+
+/// 插件市场清单（`marketplace.json`）。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MarketplaceManifest {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub schema: i64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub updated_at: Option<String>,
+    pub plugins: Vec<MarketplacePlugin>,
+}
+
+/// 安装一个插件后的结果（命令返回给前端）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MarketplaceInstallResult {
+    pub installed: bool,
+    /// 是否自动登记了应用
+    pub added_app: bool,
+    /// 自动登记的应用 id（未登记时为 None）
+    pub app_id: Option<String>,
+    /// 实际安装目录（绝对路径）
+    pub install_dir: String,
+    pub message: String,
+}
+
+/// 插件下载/安装进度（通过 `marketplace://progress` 事件推给前端）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MarketplaceProgress {
+    /// preparing / downloading / verifying / installing / done
+    pub stage: String,
+    pub downloaded: u64,
+    pub total: u64,
+    pub message: Option<String>,
+}
+
+/// 前端展示用的插件视图（在清单基础上补充「已安装」状态）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MarketplacePluginView {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub author: String,
+    /// `python_script` / `program` / `dependency`
+    pub kind: String,
+    pub download_url: String,
+    pub icon_url: Option<String>,
+    pub entry: String,
+    pub launch_kind: i32,
+    pub interpreter: String,
+    pub auto_add: bool,
+    pub installed: bool,
+    pub installed_version: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -67,6 +67,19 @@ pub fn get_groups(conn: &Connection) -> Result<Vec<AppGroup>, String> {
     Ok(groups)
 }
 
+/// 返回默认分组的 id（用于插件市场自动添加应用）。
+/// 找不到默认分组时兜底返回种子值 `default`，避免安装中断。
+pub fn get_default_group_id(conn: &Connection) -> Result<String, String> {
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM app_groups WHERE is_default = 1 ORDER BY sort_order LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(id.unwrap_or_else(|| "default".to_string()))
+}
+
 pub fn create_group(conn: &Connection, name: &str) -> Result<AppGroup, String> {
     let name = name.trim();
     if name.is_empty() {

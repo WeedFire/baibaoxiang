@@ -1,0 +1,228 @@
+.marketplace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 24px;
+  overflow-y: auto;
+  background-color: #c7edcc;
+  color: #2f3a30;
+}
+
+.marketplace-header h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.marketplace-sub {
+  margin: 4px 0 0;
+  color: #5c6b5e;
+  font-size: 13px;
+}
+
+.marketplace-filters {
+  display: flex;
+  gap: 8px;
+  margin: 16px 0;
+  flex-wrap: wrap;
+}
+
+.marketplace-filter {
+  padding: 6px 14px;
+  border: 1px solid #a9d6ae;
+  background: #d8f2dc;
+  color: #2f3a30;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.marketplace-filter:hover {
+  background: #c7edcc;
+}
+
+.marketplace-filter.active {
+  background: #4a9eff;
+  border-color: #4a9eff;
+  color: #fff;
+}
+
+.marketplace-error {
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: #ffe3e3;
+  border: 1px solid #ffb3b3;
+  border-radius: 8px;
+  color: #c0392b;
+  font-size: 13px;
+}
+
+.marketplace-empty {
+  padding: 40px;
+  text-align: center;
+  color: #5c6b5e;
+}
+
+.marketplace-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.plugin-card {
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border: 1px solid #a9d6ae;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 1px 3px rgba(47, 58, 48, 0.08);
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+
+.plugin-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(47, 58, 48, 0.12);
+}
+
+.plugin-card.installed {
+  border-color: #6fcf97;
+}
+
+.plugin-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  background: #eef7ef;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.plugin-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.plugin-emoji {
+  font-size: 24px;
+}
+
+.plugin-body {
+  flex: 1;
+}
+
+.plugin-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.plugin-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.plugin-kind {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eef7ef;
+  color: #4a7a55;
+  white-space: nowrap;
+}
+
+.plugin-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #8a978c;
+}
+
+.plugin-desc {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #5c6b5e;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.plugin-footer {
+  margin-top: 14px;
+}
+
+.plugin-install-btn {
+  width: 100%;
+  padding: 8px 0;
+  border: none;
+  border-radius: 8px;
+  background: #4a9eff;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.plugin-install-btn:hover:not(:disabled) {
+  background: #3a8aef;
+}
+
+.plugin-install-btn:disabled {
+  background: #b8c9d6;
+  cursor: not-allowed;
+}
+
+.plugin-installed {
+  display: inline-block;
+  width: 100%;
+  text-align: center;
+  padding: 8px 0;
+  border-radius: 8px;
+  background: #eafaf0;
+  color: #2f9e57;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.plugin-progress {
+  position: relative;
+  width: 100%;
+  height: 32px;
+  border-radius: 8px;
+  background: #eef7ef;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+}
+
+.plugin-progress-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: #4a9eff;
+  transition: width 0.2s;
+}
+
+.plugin-progress-label {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  text-align: center;
+  font-size: 12px;
+  color: #2f3a30;
+}
+
+.plugin-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #c0392b;
+}

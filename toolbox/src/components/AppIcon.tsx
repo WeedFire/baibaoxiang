@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { api, iconUrl, LaunchKind, type AppItem } from '../lib/tauri';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
+import pythonIcon from '../assets/python.png';
 import './AppIcon.css';
 
 interface AppIconProps {
@@ -25,7 +26,7 @@ export function AppIcon({ app, isLocked, onRefresh, onEdit }: AppIconProps) {
   // 网页与命令没有本地文件，不能“打开文件位置”
   const hasLocalTarget = kind === LaunchKind.Program || isPython;
   const placeholder =
-    kind === LaunchKind.Web ? '🌐' : kind === LaunchKind.Command ? '💻' : isPython ? '🐍' : '📦';
+    kind === LaunchKind.Web ? '🌐' : kind === LaunchKind.Command ? '💻' : '📦';
   const badge =
     kind === LaunchKind.Web ? 'WEB' : kind === LaunchKind.Command ? 'CMD' : isPython ? 'PY' : null;
 
@@ -134,6 +135,9 @@ export function AppIcon({ app, isLocked, onRefresh, onEdit }: AppIconProps) {
         <div className="app-icon-image">
           {icon ? (
             <img src={icon} alt={app.name} />
+          ) : isPython ? (
+            // Python 应用兜底显示 Python 官方标志，而不是占位 emoji
+            <img src={pythonIcon} alt={app.name} draggable={false} />
           ) : (
             <div className="app-icon-placeholder">{placeholder}</div>
           )}

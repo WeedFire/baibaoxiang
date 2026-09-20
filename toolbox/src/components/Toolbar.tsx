@@ -13,6 +13,7 @@ export function Toolbar({ onAddApp, onSettings }: ToolbarProps) {
   const tabs: { id: TabId; label: string }[] = [
     { id: 'dashboard', label: '主页' },
     { id: 'apps', label: '应用' },
+    { id: 'marketplace', label: '插件市场' },
   ];
 
   return (

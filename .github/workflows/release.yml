@@ -137,12 +137,30 @@ jobs:
             --notes-file release-notes.md `
             --out dist/latest.json
 
-      - name: 发布 GitHub Release
+      - name: 打包插件市场（pyTools + 依赖目录，地址指向 Gitee）
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          node scripts/package-plugins.mjs `
+            --repo "wjqnxw/baibaoxiang-plugins" `
+            --tag "plugins" `
+            --plugins-dir "../pyTools" `
+            --deps-dir "../python-deps" `
+            --out dist/plugins
+
+      - name: 发布 GitHub Release（仅 App 更新包）
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: "百宝箱 v${{ env.VERSION }}"
           body_path: release-notes.md
-          files: dist/*
+          # 插件市场（dist/plugins/*）单独发布到 Gitee 仓库 wjqnxw/baibaoxiang-plugins
+          # 的 tag=plugins Release，不随本 GitHub Release 上传。
+          files: |
+            dist/baibaoxiang_*_x64-setup.exe
+            dist/*.msi
+            dist/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

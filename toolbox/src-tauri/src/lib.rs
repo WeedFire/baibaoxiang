@@ -45,6 +45,8 @@ pub fn run() {
             commands::layout_cmd::get_layout,
             commands::layout_cmd::get_all_layouts,
             commands::layout_cmd::clear_group_layouts,
+            commands::marketplace_cmd::get_marketplace,
+            commands::marketplace_cmd::install_marketplace_plugin,
             commands::update_cmd::get_update_state,
             commands::update_cmd::save_update_settings,
             commands::update_cmd::check_update,
