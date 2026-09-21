@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter};
 /// 拉取插件市场清单，并补充每个插件的「已安装」状态。
 #[tauri::command]
 pub fn get_marketplace() -> Result<Vec<MarketplacePluginView>, String> {
-    let manifest = marketplace_service::fetch_manifest(marketplace_service::MARKETPLACE_URL)?;
+    let manifest = marketplace_service::fetch_manifest_auto()?;
     let base = crate::utils::app_base_dir().ok_or_else(|| "程序根目录未确定".to_string())?;
     let markers = marketplace_service::read_all_markers(base);
 
@@ -40,7 +40,7 @@ pub fn get_marketplace() -> Result<Vec<MarketplacePluginView>, String> {
 /// 下载并安装一个插件（进度通过 `marketplace://progress` 事件推给前端）。
 #[tauri::command]
 pub fn install_marketplace_plugin(app: AppHandle, plugin_id: String) -> Result<MarketplaceInstallResult, String> {
-    let manifest = marketplace_service::fetch_manifest(marketplace_service::MARKETPLACE_URL)?;
+    let manifest = marketplace_service::fetch_manifest_auto()?;
     let plugin = manifest
         .plugins
         .into_iter()

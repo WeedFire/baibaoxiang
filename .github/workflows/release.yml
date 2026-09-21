@@ -24,6 +24,12 @@ on:
 permissions:
   contents: write
 
+# 本 workflow 位于仓库根，但 package.json / src-tauri / scripts 都在 toolbox/ 下，
+# 因此所有 run 步骤统一以 toolbox 为工作目录（.action 的 inputs 仍按仓库根解析）。
+defaults:
+  run:
+    working-directory: toolbox
+
 jobs:
   verify:
     name: 校验（lint + 单测）
@@ -35,12 +41,13 @@ jobs:
         with:
           node-version: 20
           cache: npm
+          cache-dependency-path: toolbox/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: toolbox/src-tauri
 
       - name: 安装前端依赖
         run: npm ci
@@ -49,8 +56,7 @@ jobs:
         run: npm run lint
 
       - name: Rust 单元测试
-        run: cargo test --lib
-        working-directory: src-tauri
+        run: cargo test --lib --manifest-path src-tauri/Cargo.toml
 
   release:
     name: 打包发布
@@ -66,12 +72,13 @@ jobs:
         with:
           node-version: 20
           cache: npm
+          cache-dependency-path: toolbox/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: toolbox/src-tauri
 
       - name: 安装前端依赖
         run: npm ci
@@ -148,6 +155,8 @@ jobs:
             --tag "plugins" `
             --plugins-dir "../pyTools" `
             --deps-dir "../python-deps" `
+            --program "../python" `
+            --meta "scripts/plugins-meta.json" `
             --out dist/plugins
 
       - name: 发布 GitHub Release（仅 App 更新包）
@@ -156,11 +165,12 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: "百宝箱 v${{ env.VERSION }}"
           body_path: release-notes.md
-          # 插件市场（dist/plugins/*）单独发布到 Gitee 仓库 wjqnxw/baibaoxiang-plugins
+          # 插件市场（toolbox/dist/plugins/*）单独发布到 Gitee 仓库 wjqnxw/baibaoxiang-plugins
           # 的 tag=plugins Release，不随本 GitHub Release 上传。
+          # action 的路径按仓库根解析（不受上面 defaults.run.working-directory 影响）。
           files: |
-            dist/baibaoxiang_*_x64-setup.exe
-            dist/*.msi
-            dist/latest.json
+            toolbox/dist/baibaoxiang_*_x64-setup.exe
+            toolbox/dist/*.msi
+            toolbox/dist/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

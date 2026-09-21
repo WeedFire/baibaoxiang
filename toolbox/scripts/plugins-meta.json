@@ -1,0 +1,8 @@
+{
+  "python": {
+    "name": "内置 Python 运行环境",
+    "description": "Python 3.14.7 运行时（含 pip），供 Python 脚本类插件与应用执行。安装到 <安装目录>/python/。",
+    "version": "3.14.7",
+    "author": "Python Software Foundation"
+  }
+}

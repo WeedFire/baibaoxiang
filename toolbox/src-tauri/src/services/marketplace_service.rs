@@ -21,11 +21,19 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 
-/// 插件市场清单地址（写死在代码里，不暴露给用户）。
-/// 独立托管在 Gitee 仓库 `wjqnxw/baibaoxiang-plugins`，与 App 更新源（GitHub）分开。
-/// Gitee 不支持 `/latest/` 别名，必须用具体 tag，这里固定为 `plugins`。
+/// 兜底清单地址：固定 tag `plugins` 的 Release 资产（写死在代码里，不暴露给用户）。
+/// 正常情况优先走 [`MARKETPLACE_LATEST_API`] 自动跟随最新 Release，只有它失败才回退到这里。
 pub const MARKETPLACE_URL: &str =
     "https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/plugins/marketplace.json";
+
+/// Gitee「最新 Release」API（仓库 `wjqnxw/baibaoxiang-plugins`，独立于 App 更新源 GitHub）。
+/// Gitee 没有 `/releases/latest/download/` 别名，该接口返回最新 Release 的 `tag_name` 与 `assets`，
+/// 据此定位 `marketplace.json`，从而无需把 tag 写死在代码里。
+pub const MARKETPLACE_LATEST_API: &str =
+    "https://gitee.com/api/v5/repos/wjqnxw/baibaoxiang-plugins/releases/latest";
+
+/// 清单在 Release 资产中的文件名。
+const MANIFEST_ASSET_NAME: &str = "marketplace.json";
 const USER_AGENT: &str = "baibaoxiang/marketplace";
 
 /// 上报一个进度阶段（封装构造，避免调用处重复样板）。
@@ -118,6 +126,111 @@ pub fn parse_manifest(text: &str) -> Result<MarketplaceManifest, String> {
         return Err("插件市场清单中没有可用插件".to_string());
     }
     Ok(manifest)
+}
+
+// ---------------- 自动跟随最新 Release ----------------
+
+/// Gitee Release JSON（只取需要的字段）。
+#[derive(serde::Deserialize)]
+struct GiteeRelease {
+    #[serde(default)]
+    tag_name: Option<String>,
+    #[serde(default)]
+    assets: Vec<GiteeAsset>,
+}
+
+#[derive(serde::Deserialize)]
+struct GiteeAsset {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    browser_download_url: Option<String>,
+}
+
+/// 从 Gitee `releases/latest` 响应里找出 `marketplace.json` 资产，返回 `(下载地址, tag)`。
+pub fn manifest_asset_from_release(text: &str) -> Result<(String, String), String> {
+    let text = text.trim_start_matches('\u{feff}').trim();
+    let release: GiteeRelease =
+        serde_json::from_str(text).map_err(|e| format!("解析 Gitee Release 失败: {}", e))?;
+    let tag = release.tag_name.unwrap_or_default();
+    let url = release
+        .assets
+        .iter()
+        .find(|a| a.name.as_deref() == Some(MANIFEST_ASSET_NAME))
+        .and_then(|a| a.browser_download_url.clone())
+        .ok_or_else(|| format!("最新 Release 中缺少 {} 资产", MANIFEST_ASSET_NAME))?;
+    Ok((url, tag))
+}
+
+/// 把下载地址里的 Release tag 换成 `tag`：
+/// `.../releases/download/<old-tag>/<file>` → `.../releases/download/<tag>/<file>`。
+/// 这样清单里即便写着别的 tag（例如打包时的默认值），也能对齐到实际发布的最新 Release。
+pub fn retag_download_url(url: &str, tag: &str) -> String {
+    let tag = tag.trim();
+    if tag.is_empty() {
+        return url.to_string();
+    }
+    const MARK: &str = "/releases/download/";
+    let Some(idx) = url.find(MARK) else {
+        return url.to_string();
+    };
+    let head_end = idx + MARK.len();
+    let rest = &url[head_end..];
+    let Some(slash) = rest.find('/') else {
+        return url.to_string();
+    };
+    format!("{}{}/{}", &url[..head_end], tag, &rest[slash + 1..])
+}
+
+/// 用实际 tag 重写清单里每个插件的下载地址。
+pub fn retag_manifest(manifest: &mut MarketplaceManifest, tag: &str) {
+    for plugin in manifest.plugins.iter_mut() {
+        plugin.download_url = retag_download_url(&plugin.download_url, tag);
+    }
+}
+
+/// GET 一个 URL 并返回正文（插件市场内部用）。
+fn http_get_text(url: &str) -> Result<String, String> {
+    let agent = update_install::build_agent(std::time::Duration::from_secs(30));
+    let mut resp = agent
+        .get(url)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|e| format!("请求失败: {}", e))?;
+    let status = resp.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(format!("服务器返回 HTTP {}", status));
+    }
+    resp.body_mut()
+        .read_to_string()
+        .map_err(|e| format!("读取响应失败: {}", e))
+}
+
+/// 拉取清单（生产入口）：自动跟随 Gitee 最新 Release。
+pub fn fetch_manifest_auto() -> Result<MarketplaceManifest, String> {
+    fetch_manifest_auto_from(MARKETPLACE_LATEST_API, MARKETPLACE_URL)
+}
+
+/// [`fetch_manifest_auto`] 的可注入实现（URL 可替换，便于测试）。
+/// 优先走「最新 Release」API 定位 `marketplace.json`，并把各插件下载地址对齐到该 Release 的 tag；
+/// 任何一步失败都回退到 `fallback_url`（固定 tag 地址）。
+pub fn fetch_manifest_auto_from(
+    api_url: &str,
+    fallback_url: &str,
+) -> Result<MarketplaceManifest, String> {
+    let latest = http_get_text(api_url)
+        .and_then(|text| manifest_asset_from_release(&text))
+        .and_then(|(url, tag)| {
+            fetch_manifest(&url).map(|mut manifest| {
+                retag_manifest(&mut manifest, &tag);
+                manifest
+            })
+        });
+    match latest {
+        Ok(manifest) => Ok(manifest),
+        Err(e) => fetch_manifest(fallback_url)
+            .map_err(|fallback| format!("{}（回退固定地址亦失败：{}）", e, fallback)),
+    }
 }
 
 /// 下载 →（验签）→ 解压，返回实际安装目录。
@@ -457,6 +570,30 @@ fn serve_bytes(body: Vec<u8>) -> (u16, std::thread::JoinHandle<()>) {
     (port, handle)
 }
 
+/// 顺序返回多个 JSON 响应体的本地 HTTP 服务；端口先给出，便于把端口写进响应内容（测试用）。
+#[cfg(test)]
+fn serve_json_sequence(build: impl FnOnce(u16) -> Vec<String>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bodies = build(port);
+    std::thread::spawn(move || {
+        for body in bodies {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        }
+    });
+    port
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +678,61 @@ mod tests {
         assert_eq!(m.plugins.len(), 2);
         assert!(parse_manifest("").is_err());
         assert!(parse_manifest("[]").is_err());
+    }
+
+    #[test]
+    fn retags_download_url_to_actual_release_tag() {
+        let url = "https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/plugins/a_1.0.0.zip";
+        assert_eq!(
+            retag_download_url(url, "v1.0.0"),
+            "https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/v1.0.0/a_1.0.0.zip"
+        );
+        // 不含 Release 标记、或 tag 为空时原样返回
+        assert_eq!(retag_download_url("http://x/a.zip", "v1"), "http://x/a.zip");
+        assert_eq!(retag_download_url(url, "  "), url);
+    }
+
+    #[test]
+    fn finds_manifest_asset_in_latest_release() {
+        let text = r#"{
+            "tag_name": "v1.0.0",
+            "assets": [
+                {"name": "a_1.0.0.zip", "browser_download_url": "https://gitee.com/r/releases/download/v1.0.0/a_1.0.0.zip"},
+                {"name": "marketplace.json", "browser_download_url": "https://gitee.com/r/releases/download/v1.0.0/marketplace.json"}
+            ]
+        }"#;
+        let (url, tag) = manifest_asset_from_release(text).unwrap();
+        assert_eq!(tag, "v1.0.0");
+        assert!(url.ends_with("/v1.0.0/marketplace.json"));
+        // 缺少清单资产要报错
+        assert!(manifest_asset_from_release(r#"{"tag_name":"v1","assets":[]}"#).is_err());
+    }
+
+    #[test]
+    fn auto_fetch_follows_latest_release_and_aligns_tag() {
+        let manifest = r#"{"plugins":[{"id":"a","name":"A","kind":"python_script","entry":"a.py",
+            "download_url":"https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/plugins/a_1.0.0.zip"}]}"#
+            .to_string();
+        let port = serve_json_sequence(|port| {
+            vec![
+                format!(
+                    r#"{{"tag_name":"v1.0.0","assets":[
+                    {{"name":"a_1.0.0.zip","browser_download_url":"http://127.0.0.1:{port}/a.zip"}},
+                    {{"name":"marketplace.json","browser_download_url":"http://127.0.0.1:{port}/mp.json"}}]}}"#,
+                    port = port
+                ),
+                manifest.clone(),
+            ]
+        });
+        let api = format!("http://127.0.0.1:{}/latest", port);
+        let fallback = format!("http://127.0.0.1:{}/fallback.json", port);
+        let m = fetch_manifest_auto_from(&api, &fallback).unwrap();
+        assert_eq!(m.plugins.len(), 1);
+        // 清单里写的是 `plugins`，应被对齐为最新 Release 的 `v1.0.0`
+        assert_eq!(
+            m.plugins[0].download_url,
+            "https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/v1.0.0/a_1.0.0.zip"
+        );
     }
 
     #[test]
