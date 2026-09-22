@@ -8,7 +8,7 @@ const KIND_TABS = [
   { key: 'all', label: '全部' },
   { key: 'python_script', label: 'Python 脚本' },
   { key: 'program', label: '程序包' },
-  { key: 'dependency', label: '依赖包' },
+  { key: 'dependency', label: 'Python 依赖' },
 ] as const;
 
 type KindKey = (typeof KIND_TABS)[number]['key'];
@@ -20,7 +20,7 @@ function kindBadge(kind: string): string {
     case 'program':
       return '程序包';
     case 'dependency':
-      return '依赖包';
+      return 'Python 依赖';
     default:
       return kind;
   }
@@ -108,7 +108,7 @@ export function Marketplace({ onInstalled }: { onInstalled: () => void }) {
                   <span className="plugin-kind">{kindBadge(p.kind)}</span>
                 </div>
                 <div className="plugin-meta">
-                  v{p.version}
+                  {p.pip ? `pip install ${p.pip}` : `v${p.version}`}
                   {p.author ? ` · ${p.author}` : ''}
                   {p.python_requirement ? ` · ${p.python_requirement}` : ''}
                 </div>
@@ -138,7 +138,7 @@ export function Marketplace({ onInstalled }: { onInstalled: () => void }) {
                     disabled={installer.busy}
                     onClick={() => void handleInstall(p)}
                   >
-                    下载安装
+                    {p.pip ? 'pip 安装' : '下载安装'}
                   </button>
                 )}
                 {isInstalling && installer.error && (

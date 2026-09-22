@@ -16,15 +16,17 @@ use crate::models::{
 use crate::services::{data_service, icon_service, update_install, update_service};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 
-/// 兜底清单地址：固定 tag `plugins` 的 Release 资产（写死在代码里，不暴露给用户）。
-/// 正常情况优先走 [`MARKETPLACE_LATEST_API`] 自动跟随最新 Release，只有它失败才回退到这里。
+/// 兜底清单地址（写死在代码里，不暴露给用户）。
+/// 正常情况优先走 [`MARKETPLACE_LATEST_API`] 自动跟随最新 Release，只有它失败才回退到这里；
+/// 回退时仍会按该 URL 里的 tag 纠正清单中的下载地址（见 [`tag_from_download_url`]）。
 pub const MARKETPLACE_URL: &str =
-    "https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/plugins/marketplace.json";
+    "https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/v1.0.0/marketplace.json";
 
 /// Gitee「最新 Release」API（仓库 `wjqnxw/baibaoxiang-plugins`，独立于 App 更新源 GitHub）。
 /// Gitee 没有 `/releases/latest/download/` 别名，该接口返回最新 Release 的 `tag_name` 与 `assets`，
@@ -83,6 +85,114 @@ pub fn install_dir_for_with(base: &Path, plugin: &MarketplacePlugin) -> PathBuf 
     match plugin.kind {
         PluginKind::Dependency => target,
         _ => target.join(&plugin.id),
+    }
+}
+
+// ---------------- Python 依赖（pip 直接安装） ----------------
+
+/// 是否走 pip 安装：`dependency` 且声明了非空 `pip` 规格。
+pub fn is_pip_dependency(plugin: &MarketplacePlugin) -> bool {
+    matches!(plugin.kind, PluginKind::Dependency)
+        && plugin
+            .pip
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+}
+
+/// 内置 Python 解释器路径（`<根>/python/python.exe`，即随包分发的运行环境）。
+pub fn bundled_python(base: &Path) -> PathBuf {
+    base.join("python").join("python.exe")
+}
+
+/// 构造 pip 安装参数：`python -m pip install <规格>`（规格整体作为单个参数，保留 `>=2.31` 等写法）。
+pub fn pip_install_args(spec: &str) -> Vec<String> {
+    vec![
+        "-m".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        spec.trim().to_string(),
+    ]
+}
+
+/// 用内置 Python 的 pip 安装一个依赖；缺少内置 Python 时提示先安装 Python 程序包。
+pub fn install_pip_dependency(
+    base: &Path,
+    plugin: &MarketplacePlugin,
+    progress: &mut dyn FnMut(MarketplaceProgress),
+) -> Result<String, String> {
+    install_pip_dependency_with(base, plugin, &mut run_pip_install, progress)
+}
+
+/// [`install_pip_dependency`] 的可注入实现（`runner` 便于测试，不真正执行 pip）。
+pub fn install_pip_dependency_with(
+    base: &Path,
+    plugin: &MarketplacePlugin,
+    runner: &mut dyn FnMut(&Path, &[String]) -> Result<String, String>,
+    progress: &mut dyn FnMut(MarketplaceProgress),
+) -> Result<String, String> {
+    let spec = plugin.pip.as_deref().unwrap_or("").trim().to_string();
+    if spec.is_empty() {
+        return Err("该依赖未声明 pip 包名（`pip` 字段为空）".to_string());
+    }
+
+    let python = bundled_python(base);
+    if !python.is_file() {
+        return Err(format!(
+            "未找到内置 Python（{}）。请先在「插件市场」安装「Python 运行环境」程序包，再安装依赖。",
+            python.display()
+        ));
+    }
+
+    report(
+        progress,
+        "installing",
+        0,
+        0,
+        Some(format!("正在用 pip 安装 {}…", spec)),
+    );
+    runner(&python, &pip_install_args(&spec))?;
+    report(progress, "done", 0, 0, Some("依赖安装完成".to_string()));
+
+    // pip 会把包装进内置 Python 的 site-packages
+    Ok(target_dir_with(base, PluginKind::Dependency)
+        .to_string_lossy()
+        .to_string())
+}
+
+/// 真实执行 pip（隐藏控制台窗口），失败时返回 stderr 末尾以便定位。
+fn run_pip_install(python: &Path, args: &[String]) -> Result<String, String> {
+    let mut cmd = std::process::Command::new(python);
+    cmd.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("启动 pip 失败（{}）: {}", python.display(), e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        return Err(format!("pip 安装失败: {}", tail_chars(detail, 500)));
+    }
+    Ok(stdout)
+}
+
+/// 取字符串末尾至多 `max` 个字符（错误信息避免过长）。
+fn tail_chars(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        text.to_string()
+    } else {
+        format!("…{}", chars[chars.len() - max..].iter().collect::<String>())
     }
 }
 
@@ -189,6 +299,20 @@ pub fn retag_manifest(manifest: &mut MarketplaceManifest, tag: &str) {
     }
 }
 
+/// 从 Release 资产地址里取出 tag：`.../releases/download/<tag>/<file>` → `<tag>`。
+pub fn tag_from_download_url(url: &str) -> Option<String> {
+    const MARK: &str = "/releases/download/";
+    let idx = url.find(MARK)?;
+    let rest = &url[idx + MARK.len()..];
+    let slash = rest.find('/')?;
+    let tag = &rest[..slash];
+    if tag.is_empty() {
+        None
+    } else {
+        Some(tag.to_string())
+    }
+}
+
 /// GET 一个 URL 并返回正文（插件市场内部用）。
 fn http_get_text(url: &str) -> Result<String, String> {
     let agent = update_install::build_agent(std::time::Duration::from_secs(30));
@@ -228,7 +352,14 @@ pub fn fetch_manifest_auto_from(
         });
     match latest {
         Ok(manifest) => Ok(manifest),
+        // 回退固定地址时，用该地址里的 tag 纠正清单，避免清单生成时用的 tag 与实际 Release 不一致
         Err(e) => fetch_manifest(fallback_url)
+            .map(|mut manifest| {
+                if let Some(tag) = tag_from_download_url(fallback_url) {
+                    retag_manifest(&mut manifest, &tag);
+                }
+                manifest
+            })
             .map_err(|fallback| format!("{}（回退固定地址亦失败：{}）", e, fallback)),
     }
 }
@@ -290,13 +421,29 @@ pub fn download_and_extract(
     Ok(install_dir)
 }
 
-/// 完整安装一个插件：下载解压 +（脚本类）自动登记应用 + 写安装标记。
+/// 完整安装一个插件：pip 依赖走 pip 安装；其余下载解压 +（脚本类）自动登记应用 + 写标记。
 pub fn install_plugin(
     app: &AppHandle,
     base: &Path,
     plugin: &MarketplacePlugin,
     progress: &mut dyn FnMut(MarketplaceProgress),
 ) -> Result<MarketplaceInstallResult, String> {
+    if is_pip_dependency(plugin) {
+        let install_dir = install_pip_dependency(base, plugin, progress)?;
+        write_marker(base, plugin, &install_dir, None)?;
+        report(progress, "done", 0, 0, Some("依赖安装完成".to_string()));
+        return Ok(MarketplaceInstallResult {
+            installed: true,
+            added_app: false,
+            app_id: None,
+            install_dir,
+            message: format!(
+                "已用 pip 安装 {}",
+                plugin.pip.as_deref().unwrap_or("").trim()
+            ),
+        });
+    }
+
     let install_dir = download_and_extract(base, plugin, update_service::PUBLIC_KEY, progress)?;
 
     let mut added_app = false;
@@ -452,6 +599,41 @@ pub fn read_all_markers(base: &Path) -> HashMap<String, PluginMarker> {
         }
     }
     map
+}
+
+/// 删除某个应用对应的插件安装标记。
+///
+/// 应用被删除后，市场里由它安装的插件应恢复为「未安装」，可以再次下载安装。
+/// 只清理记录了 `app_id` 的标记；`program` / `dependency` 这类没有应用登记的标记不受影响。
+pub fn remove_markers_for_app(base: &Path, app_id: &str) -> Vec<String> {
+    let mut removed = Vec::new();
+    for (id, marker) in read_all_markers(base) {
+        if marker.app_id.as_deref() == Some(app_id) {
+            if std::fs::remove_file(marker_path(base, &id)).is_ok() {
+                removed.push(id);
+            }
+        }
+    }
+    removed
+}
+
+/// 清理「登记的 app_id 已不在应用列表里」的过期标记（自愈）。
+///
+/// 覆盖删分组（`app_items.group_id` 级联删除）、清空配置、导入配置等绕过
+/// `delete_app` 的路径，保证市场状态始终与实际应用列表一致。
+pub fn prune_stale_markers(base: &Path, live_app_ids: &HashSet<String>) -> Vec<String> {
+    let mut removed = Vec::new();
+    for (id, marker) in read_all_markers(base) {
+        let Some(app_id) = marker.app_id.as_deref() else {
+            continue; // 非应用型插件（program / dependency）
+        };
+        if !live_app_ids.contains(app_id) {
+            if std::fs::remove_file(marker_path(base, &id)).is_ok() {
+                removed.push(id);
+            }
+        }
+    }
+    removed
 }
 
 /// 单个插件的安装标记。
@@ -629,6 +811,105 @@ mod tests {
         assert_eq!(kind_to_str(PluginKind::PythonScript), "python_script");
     }
 
+    fn pip_plugin() -> MarketplacePlugin {
+        serde_json::from_str(
+            r#"{"id":"requests","name":"requests","kind":"dependency","pip":"requests>=2.31"}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn detects_pip_dependency_entries() {
+        assert!(is_pip_dependency(&pip_plugin()));
+
+        let plain: MarketplacePlugin = serde_json::from_str(
+            r#"{"id":"x","name":"X","kind":"dependency","download_url":"http://x/y.zip"}"#,
+        )
+        .unwrap();
+        assert!(!is_pip_dependency(&plain), "未声明 pip 的依赖仍走下载");
+
+        let script: MarketplacePlugin =
+            serde_json::from_str(r#"{"id":"s","name":"S","kind":"python_script","pip":"requests"}"#)
+                .unwrap();
+        assert!(!is_pip_dependency(&script), "只有 dependency 才走 pip");
+    }
+
+    #[test]
+    fn parses_dependency_without_download_url() {
+        let m = parse_manifest(
+            r#"{"plugins":[{"id":"requests","name":"requests","kind":"dependency","pip":"requests"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(m.plugins[0].download_url, "");
+        assert_eq!(m.plugins[0].pip.as_deref(), Some("requests"));
+    }
+
+    #[test]
+    fn pip_args_use_module_form() {
+        assert_eq!(
+            pip_install_args(" requests>=2.31 "),
+            vec!["-m", "pip", "install", "requests>=2.31"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pip_install_tells_user_to_install_python_when_missing() {
+        let base = base_dir();
+        let mut runner_calls = 0;
+        let err = install_pip_dependency_with(
+            &base,
+            &pip_plugin(),
+            &mut |_, _| {
+                runner_calls += 1;
+                Ok(String::new())
+            },
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(err.contains("Python"), "{}", err);
+        assert_eq!(runner_calls, 0, "缺少 Python 时不应调用 pip");
+    }
+
+    #[test]
+    fn pip_install_invokes_bundled_python_pip() {
+        let base = base_dir();
+        std::fs::create_dir_all(base.join("python")).unwrap();
+        std::fs::write(base.join("python").join("python.exe"), b"stub").unwrap();
+
+        let mut seen: Vec<(PathBuf, Vec<String>)> = Vec::new();
+        let install_dir = install_pip_dependency_with(
+            &base,
+            &pip_plugin(),
+            &mut |python, args| {
+                seen.push((python.to_path_buf(), args.to_vec()));
+                Ok("Successfully installed requests".to_string())
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, bundled_python(&base));
+        assert_eq!(seen[0].1, pip_install_args("requests>=2.31"));
+        assert!(install_dir.ends_with("site-packages"), "{}", install_dir);
+    }
+
+    #[test]
+    fn pip_install_rejects_empty_spec() {
+        let base = base_dir();
+        std::fs::create_dir_all(base.join("python")).unwrap();
+        std::fs::write(base.join("python").join("python.exe"), b"stub").unwrap();
+        let mut plugin = pip_plugin();
+        plugin.pip = Some("   ".to_string());
+        let err =
+            install_pip_dependency_with(&base, &plugin, &mut |_, _| Ok(String::new()), &mut |_| {})
+                .unwrap_err();
+        assert!(err.contains("pip"), "{}", err);
+    }
+
     #[test]
     fn targets_dirs_by_kind() {
         let base = base_dir();
@@ -678,6 +959,35 @@ mod tests {
         assert_eq!(m.plugins.len(), 2);
         assert!(parse_manifest("").is_err());
         assert!(parse_manifest("[]").is_err());
+    }
+
+    #[test]
+    fn extracts_tag_from_release_url() {
+        assert_eq!(
+            tag_from_download_url(
+                "https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/v1.0.0/marketplace.json"
+            )
+            .as_deref(),
+            Some("v1.0.0")
+        );
+        assert_eq!(tag_from_download_url("http://x/a.zip"), None);
+        assert_eq!(tag_from_download_url("http://x/releases/download/"), None);
+    }
+
+    #[test]
+    fn fallback_retags_manifest_to_url_tag() {
+        let manifest = r#"{"plugins":[{"id":"a","name":"A","kind":"python_script","entry":"a.py",
+            "download_url":"https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/plugins/a_1.0.0.zip"}]}"#
+            .to_string();
+        let port = serve_json_sequence(move |_| vec![manifest.clone()]);
+        // 端口 1 必然连不上 → 走回退分支
+        let api = "http://127.0.0.1:1/latest".to_string();
+        let fallback = format!("http://127.0.0.1:{}/releases/download/v9.9.9/marketplace.json", port);
+        let m = fetch_manifest_auto_from(&api, &fallback).unwrap();
+        assert_eq!(
+            m.plugins[0].download_url,
+            "https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/v9.9.9/a_1.0.0.zip"
+        );
     }
 
     #[test]
@@ -981,6 +1291,57 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("签名"), "{}", err);
         let _ = server.join();
+    }
+
+    fn marker_plugin(id: &str, kind: &str) -> MarketplacePlugin {
+        serde_json::from_str(&format!(
+            r#"{{"id":"{id}","name":"{id}","kind":"{kind}","download_url":"http://x/y.zip"}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn deleting_an_app_clears_its_marketplace_marker() {
+        let base = base_dir();
+        write_marker(&base, &marker_plugin("plug_a", "python_script"), "C:/x", Some("app-a"))
+            .unwrap();
+        write_marker(&base, &marker_plugin("plug_b", "python_script"), "C:/y", Some("app-b"))
+            .unwrap();
+        write_marker(&base, &marker_plugin("python", "program"), "C:/py", None).unwrap();
+
+        let removed = remove_markers_for_app(&base, "app-a");
+
+        assert_eq!(removed, vec!["plug_a".to_string()]);
+        assert!(
+            read_marker(&base, "plug_a").is_none(),
+            "被删应用的插件应恢复为未安装"
+        );
+        assert!(read_marker(&base, "plug_b").is_some(), "其它应用的标记不受影响");
+        assert!(
+            read_marker(&base, "python").is_some(),
+            "程序包（无应用登记）不受影响"
+        );
+    }
+
+    #[test]
+    fn prunes_markers_whose_registered_app_no_longer_exists() {
+        let base = base_dir();
+        write_marker(&base, &marker_plugin("plug_a", "python_script"), "C:/x", Some("app-a"))
+            .unwrap();
+        write_marker(&base, &marker_plugin("plug_b", "python_script"), "C:/y", Some("app-b"))
+            .unwrap();
+        write_marker(&base, &marker_plugin("requests", "dependency"), "C:/s", None).unwrap();
+
+        let live: HashSet<String> = ["app-b".to_string()].into_iter().collect();
+        let removed = prune_stale_markers(&base, &live);
+
+        assert_eq!(removed, vec!["plug_a".to_string()]);
+        assert!(read_marker(&base, "plug_a").is_none());
+        assert!(read_marker(&base, "plug_b").is_some());
+        assert!(
+            read_marker(&base, "requests").is_some(),
+            "依赖类标记不应被清理"
+        );
     }
 
     // ---- 安装标记 ----

@@ -1,6 +1,6 @@
 use crate::db;
 use crate::models::{AddAppRequest, AppItem, UpdateAppRequest};
-use crate::services::{data_service, icon_service};
+use crate::services::{data_service, icon_service, marketplace_service};
 use tauri::AppHandle;
 
 #[tauri::command]
@@ -43,5 +43,15 @@ pub fn update_app(app: AppHandle, req: UpdateAppRequest) -> Result<AppItem, Stri
 #[tauri::command]
 pub fn delete_app(app: AppHandle, app_id: String) -> Result<(), String> {
     let conn = db::get_connection(&app)?;
-    data_service::delete_app(&conn, &app_id)
+    data_service::delete_app(&conn, &app_id)?;
+
+    // 由插件市场安装（自动登记）的应用被删除后，清除其插件标记，
+    // 使市场恢复为「未安装」，用户可以再次下载安装。
+    if let Some(base) = crate::utils::app_base_dir() {
+        let removed = marketplace_service::remove_markers_for_app(base, &app_id);
+        if !removed.is_empty() {
+            eprintln!("已清除插件安装标记: {:?}", removed);
+        }
+    }
+    Ok(())
 }

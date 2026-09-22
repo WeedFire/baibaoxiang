@@ -10,7 +10,7 @@ import {
 const STAGE_LABELS: Record<string, string> = {
   downloading: '正在下载',
   verifying: '正在校验签名',
-  installing: '正在解压安装',
+  installing: '正在安装',
   done: '安装完成',
 };
 

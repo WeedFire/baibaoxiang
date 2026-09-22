@@ -133,6 +133,8 @@ export interface MarketplacePlugin {
   /** python_script / program / dependency */
   kind: string;
   download_url: string;
+  /** 走 pip 安装的依赖规格（仅 dependency 有值，如 `requests>=2.31`） */
+  pip?: string | null;
   icon_url: string | null;
   entry: string;
   launch_kind: number;
@@ -285,4 +287,18 @@ export async function listenMarketplaceProgress(
   return listen<MarketplaceProgress>('marketplace://progress', (event) =>
     handler(event.payload),
   );
+}
+
+/** 应用启动过程中的提示（如「正在自动安装依赖」） */
+export interface LaunchProgress {
+  app_id: string;
+  message: string;
+}
+
+/** 订阅应用启动过程中的提示，返回取消订阅函数 */
+export async function listenLaunchProgress(
+  handler: (progress: LaunchProgress) => void,
+): Promise<UnlistenFn> {
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen<LaunchProgress>('app://launch-progress', (event) => handler(event.payload));
 }

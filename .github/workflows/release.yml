@@ -150,11 +150,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          # Python 依赖改为声明式 pip（需要时追加 `--pip "包名>=版本"`），
+          # 不再把 site-packages 逐个打包成 zip。
           node scripts/package-plugins.mjs `
             --repo "wjqnxw/baibaoxiang-plugins" `
             --tag "plugins" `
             --plugins-dir "../pyTools" `
-            --deps-dir "../python-deps" `
             --program "../python" `
             --meta "scripts/plugins-meta.json" `
             --out dist/plugins

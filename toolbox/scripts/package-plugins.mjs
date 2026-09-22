@@ -17,6 +17,8 @@
 //                  用于内置 Python 运行环境这类整体交付的运行时包（例：--program ../python → <根>/python/）
 //   --meta         外部元数据覆盖文件（JSON：{ "<id>": {...} }），优先级高于包内 plugin.json；
 //                  python/ 是只读目录联接，没法在里面放 plugin.json，就用它描述
+//   --pip          声明式 Python 依赖（可重复，如 `--pip "requests>=2.31"`）：不打包 zip，
+//                  客户端会用内置 Python 的 pip 直接安装（推荐，替代零散的 --deps-dir 打包）
 //
 // 签名需要的密钥（与更新包同一个密钥对）：
 //   TAURI_SIGNING_PRIVATE_KEY            —— `tauri signer generate` 生成的私钥内容
@@ -57,6 +59,7 @@ const { values } = parseArgs({
     'plugins-dir': { type: 'string', default: 'pyTools' },
     'deps-dir': { type: 'string' },
     program: { type: 'string', multiple: true },
+    pip: { type: 'string', multiple: true },
     meta: { type: 'string' },
     out: { type: 'string', default: 'dist/plugins' },
     'no-sign': { type: 'boolean', default: false },
@@ -106,6 +109,12 @@ function subdirs(dir) {
   return readdirSync(dir, { withFileTypes: true })
     .filter((e) => e.isDirectory())
     .map((e) => e.name);
+}
+
+/** 从 pip 规格里取包名作为插件 id（去掉版本号、环境标记、extras）。 */
+function pipPluginId(spec) {
+  const name = spec.trim().split(/[\s<>=!~;]/)[0].split('[')[0];
+  return name || 'pip-package';
 }
 
 /** 在目录里找第一个 .py 文件作为默认入口 */
@@ -186,6 +195,30 @@ for (const dir of values.program ?? []) {
   if (!existsSync(dir)) fail(`--program 目录不存在：${dir}`);
   const abs = resolve(dir);
   plugins.push(buildPlugin(dirname(abs), basename(abs), 'program'));
+}
+
+// --pip：声明式 Python 依赖（不打包 zip），客户端用内置 Python 的 pip 直接安装。
+for (const raw of values.pip ?? []) {
+  const spec = raw.trim();
+  if (!spec) continue;
+  const id = pipPluginId(spec);
+  const meta = metaOverrides[id] ?? {};
+  plugins.push({
+    id,
+    name: meta.name ?? id,
+    description: meta.description ?? `Python 依赖：${spec}`,
+    version: meta.version ?? '1.0.0',
+    author: meta.author ?? '',
+    kind: 'dependency',
+    download_url: '',
+    signature: null,
+    icon_url: meta.icon_url ?? null,
+    entry: '',
+    launch_kind: 0,
+    interpreter: '',
+    python_requirement: meta.python_requirement ?? null,
+    pip: spec,
+  });
 }
 
 if (plugins.length === 0) {

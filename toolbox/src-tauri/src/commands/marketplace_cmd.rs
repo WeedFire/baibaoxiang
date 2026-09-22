@@ -1,12 +1,23 @@
+use crate::db;
 use crate::models::{MarketplaceInstallResult, MarketplacePluginView};
-use crate::services::marketplace_service;
+use crate::services::{data_service, marketplace_service};
 use tauri::{AppHandle, Emitter};
 
 /// 拉取插件市场清单，并补充每个插件的「已安装」状态。
 #[tauri::command]
-pub fn get_marketplace() -> Result<Vec<MarketplacePluginView>, String> {
+pub fn get_marketplace(app: AppHandle) -> Result<Vec<MarketplacePluginView>, String> {
     let manifest = marketplace_service::fetch_manifest_auto()?;
     let base = crate::utils::app_base_dir().ok_or_else(|| "程序根目录未确定".to_string())?;
+
+    // 应用被删除（含删分组级联、清空/导入配置）后，对应标记应作废，
+    // 市场据此恢复为「未安装」，用户可以再次下载安装。
+    let conn = db::get_connection(&app)?;
+    let live: std::collections::HashSet<String> = data_service::get_all_apps(&conn)?
+        .into_iter()
+        .map(|item| item.id)
+        .collect();
+    marketplace_service::prune_stale_markers(base, &live);
+
     let markers = marketplace_service::read_all_markers(base);
 
     let views = manifest
@@ -24,6 +35,7 @@ pub fn get_marketplace() -> Result<Vec<MarketplacePluginView>, String> {
                 author: p.author,
                 kind,
                 download_url: p.download_url,
+                pip: p.pip,
                 icon_url: p.icon_url,
                 entry: p.entry,
                 launch_kind: p.launch_kind,

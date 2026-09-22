@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, iconUrl, LaunchKind, type AppItem, type LaunchStats } from '../lib/tauri';
+import { pushLaunchNotice } from '../lib/launchNotice';
 import { useAppStore } from '../store/appStore';
 import './Dashboard.css';
 
@@ -30,12 +31,14 @@ export function Dashboard({ onRefresh }: DashboardProps) {
 
   const handleLaunch = async (appId: string) => {
     try {
-      await api.launchApp(appId);
+      const result = await api.launchApp(appId);
+      // 启动失败（含「已在运行中」）用提示展示，不把整页换成错误页
+      if (!result.ok) pushLaunchNotice(result.message);
       await loadStats();
       onRefresh();
     } catch (err) {
       console.error('Failed to launch app:', err);
-      setError(String(err));
+      pushLaunchNotice(String(err));
     }
   };
 

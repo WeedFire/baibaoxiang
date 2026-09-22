@@ -8,6 +8,7 @@ import { Dashboard } from './pages/Dashboard';
 import { Marketplace } from './pages/Marketplace';
 import { AppDialog } from './components/AppDialog';
 import { UpdateNotice } from './components/UpdateNotice';
+import { LaunchNotices } from './components/LaunchNotices';
 import { Settings } from './pages/Settings';
 import './App.css';
 
@@ -178,6 +179,9 @@ export default function App() {
           onImported={() => void loadData()}
         />
       )}
+
+      {/* 全局启动提示：无论从哪个页面启动应用都能看到进度/错误 */}
+      <LaunchNotices />
     </div>
   );
 }

@@ -5,7 +5,17 @@ use crate::utils;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
+
+/// 启动过程中把提示推给前端（例如「正在自动安装 Python 依赖」）。
+fn emit_launch_progress(app: &AppHandle, app_id: &str, message: &str) {
+    let _ = app.emit(
+        "app://launch-progress",
+        serde_json::json!({ "app_id": app_id, "message": message }),
+    );
+}
+
+
 
 #[derive(Serialize, Deserialize)]
 pub struct ConfigExport {
@@ -29,7 +39,9 @@ pub fn launch_app(app: AppHandle, app_id: String) -> Result<LaunchResult, String
     let app_item = data_service::get_app_by_id(&conn, &app_id)?;
 
     // 右键菜单里可以临时以管理员身份运行，走独立的命令
-    let result = process_launcher::launch_app(&app_item)?;
+    let result = process_launcher::launch_app_with(&app_item, &mut |message| {
+        emit_launch_progress(&app, &app_id, message)
+    })?;
 
     if result.ok {
         let _ = conn.execute(
@@ -47,7 +59,9 @@ pub fn launch_app_as_admin(app: AppHandle, app_id: String) -> Result<LaunchResul
     let mut app_item = data_service::get_app_by_id(&conn, &app_id)?;
     app_item.run_as_admin = true;
 
-    let result = process_launcher::launch_app(&app_item)?;
+    let result = process_launcher::launch_app_with(&app_item, &mut |message| {
+        emit_launch_progress(&app, &app_id, message)
+    })?;
     if result.ok {
         let _ = conn.execute(
             "INSERT INTO launch_history (app_id) VALUES (?)",

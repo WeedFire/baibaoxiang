@@ -180,7 +180,15 @@ fn cmd_exe() -> String {
     std::env::var("COMSPEC").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".to_string())
 }
 
+/// 启动过程中的提示回调。
+///
+/// 启动应用（不需要提示时的简便入口）。
 pub fn launch_app(app: &AppItem) -> Result<LaunchResult, String> {
+    launch_app_with(app, &mut |_| {})
+}
+
+/// 启动应用；`notify` 用于上报启动过程中的提示（如「正在自动安装依赖」）。
+pub fn launch_app_with(app: &AppItem, notify: &mut dyn FnMut(&str)) -> Result<LaunchResult, String> {
     let kind = LaunchKind::of(app);
     let plan = build_launch_plan(app)?;
 
@@ -192,6 +200,29 @@ pub fn launch_app(app: &AppItem) -> Result<LaunchResult, String> {
             message: format!("已在浏览器中打开 {}", plan.program),
         });
     }
+
+    // Python 脚本：启动前自动补齐缺少的第三方依赖（检测 import → pip 安装）。
+    // 尽力而为：探测或安装失败只提示，不阻断启动。
+    let mut deps_note: Option<String> = None;
+    if kind.is_python() {
+        match crate::services::python_deps::ensure_dependencies_for_app(
+            app,
+            crate::utils::app_base_dir(),
+            &mut |message| notify(message),
+        ) {
+            Ok(packages) if !packages.is_empty() => {
+                deps_note = Some(format!("已自动安装依赖：{}", packages.join("、")));
+            }
+            Ok(_) => {}
+            Err(e) => notify(&format!("自动补齐依赖未完成（不影响启动）：{}", e)),
+        }
+    }
+    let with_note = |mut result: LaunchResult| -> LaunchResult {
+        if let Some(note) = &deps_note {
+            result.message = format!("{}（{}）", result.message, note);
+        }
+        result
+    };
 
     // CMD 命令跑在共享的 cmd.exe 上，按进程名判断是否重复启动没有意义
     if !app.allow_multiple_instances && kind != LaunchKind::Command {
@@ -226,17 +257,18 @@ pub fn launch_app(app: &AppItem) -> Result<LaunchResult, String> {
                 &plan.args,
                 plan.working_dir.as_deref(),
                 show_cmd(app.startup_window_style),
-            );
+            )
+            .map(|result| with_note(result));
         }
 
         // Python 脚本与 CMD 命令在不显示控制台时不弹窗
         let hide_console = !app.show_console && (app.is_python_script || kind == LaunchKind::Command);
-        return create_process(&plan, hide_console);
+        return create_process(&plan, hide_console).map(|result| with_note(result));
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        create_process(&plan, false)
+        create_process(&plan, false).map(|result| with_note(result))
     }
 }
 
@@ -796,6 +828,46 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert!(ok, "Python 脚本未产生预期输出（解释器: {}）", py.path);
+    }
+
+    /// Python 脚本启动前会尝试补齐依赖；探测失败（解释器跑不起来）也不阻断启动，只提示。
+    #[test]
+    fn python_launch_reports_dependency_probe_failure_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("main.py");
+        std::fs::write(&script, "import __definitely_not_installed__\n").unwrap();
+        let interp = dir.path().join("python.exe");
+        std::fs::write(&interp, b"not-a-real-exe").unwrap();
+
+        let mut app = make_app();
+        app.is_python_script = true;
+        app.executable_path = script.to_string_lossy().to_string();
+        app.python_interpreter_path = Some(interp.to_string_lossy().to_string());
+
+        let mut notices: Vec<String> = Vec::new();
+        let _ = launch_app_with(&app, &mut |msg| notices.push(msg.to_string()));
+
+        assert!(
+            notices.iter().any(|n| n.contains("自动补齐依赖")),
+            "应提示依赖探测失败：{:?}",
+            notices
+        );
+    }
+
+    /// 非 Python 应用不触发依赖探测（不会有任何提示）。
+    #[test]
+    fn non_python_launch_does_not_probe_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = make_app();
+        app.launch_kind = LaunchKind::Command as i32;
+        app.executable_path = "echo hi".into();
+        app.working_directory = Some(dir.path().to_string_lossy().to_string());
+
+        let mut notices: Vec<String> = Vec::new();
+        let result = launch_app_with(&app, &mut |msg| notices.push(msg.to_string())).unwrap();
+
+        assert!(result.ok, "{}", result.message);
+        assert!(notices.is_empty(), "{:?}", notices);
     }
 
     /// 端到端：单实例开关生效时，已运行的程序不会被重复启动。

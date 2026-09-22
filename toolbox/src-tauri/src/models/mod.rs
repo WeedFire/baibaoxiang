@@ -373,7 +373,8 @@ pub enum PluginKind {
     PythonScript,
     /// 程序包（python 运行环境的一部分）：下载到 `<根>/<id>/`，仅放置文件
     Program,
-    /// 依赖包：下载到 `<根>/python/Lib/site-packages/`，仅放置文件
+    /// Python 依赖：默认用内置 Python 的 pip 直接安装（`pip` 字段，如 `requests>=2.31`）；
+    /// 未声明 `pip` 时回退为下载归档到 `<根>/python/Lib/site-packages/`（兼容旧数据）
     Dependency,
 }
 
@@ -384,7 +385,7 @@ impl PluginKind {
         match self {
             PluginKind::PythonScript => "Python 脚本",
             PluginKind::Program => "程序包",
-            PluginKind::Dependency => "依赖包",
+            PluginKind::Dependency => "Python 依赖",
         }
     }
 }
@@ -401,7 +402,12 @@ pub struct MarketplacePlugin {
     #[serde(default)]
     pub author: String,
     pub kind: PluginKind,
+    /// 归档下载地址；`dependency` 走 pip 安装时可为空（不下载）
+    #[serde(default)]
     pub download_url: String,
+    /// 走 pip 安装的依赖规格（如 `requests>=2.31`）；仅 `dependency` 且非空时生效
+    #[serde(default)]
+    pub pip: Option<String>,
     /// 覆盖归档字节的 ed25519/minisign 签名（base64）；留空表示不校验
     #[serde(default)]
     pub signature: Option<String>,
@@ -472,6 +478,8 @@ pub struct MarketplacePluginView {
     /// `python_script` / `program` / `dependency`
     pub kind: String,
     pub download_url: String,
+    /// 走 pip 安装的依赖规格（仅 `dependency` 有值）
+    pub pip: Option<String>,
     pub icon_url: Option<String>,
     pub entry: String,
     pub launch_kind: i32,
