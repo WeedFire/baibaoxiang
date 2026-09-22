@@ -26,7 +26,7 @@ use tauri::AppHandle;
 /// 正常情况优先走 [`MARKETPLACE_LATEST_API`] 自动跟随最新 Release，只有它失败才回退到这里；
 /// 回退时仍会按该 URL 里的 tag 纠正清单中的下载地址（见 [`tag_from_download_url`]）。
 pub const MARKETPLACE_URL: &str =
-    "https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/v1.0.0/marketplace.json";
+    "https://gitee.com/wjqnxw/baibaoxiang-plugins/releases/download/plugins/marketplace.json";
 
 /// Gitee「最新 Release」API（仓库 `wjqnxw/baibaoxiang-plugins`，独立于 App 更新源 GitHub）。
 /// Gitee 没有 `/releases/latest/download/` 别名，该接口返回最新 Release 的 `tag_name` 与 `assets`，
