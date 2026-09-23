@@ -45,9 +45,9 @@ pub fn find_bundled_python(roots: &[PathBuf]) -> Option<PathBuf> {
 
 /// 检测本机所有可用的 Python 解释器，返回可直接 spawn 的绝对路径。
 ///
-/// 排序：系统解释器（py 启动器 / 常见目录 / conda / PATH）按版本降序在前，
-/// 随程序安装的内置解释器垫底作为兜底——优先使用用户自己的环境
-/// （装了第三方包），内置副本只在系统没有 Python 时才被选中。
+/// 排序：系统解释器（py 启动器 / 常见目录 / conda / PATH）按版本降序在前，内置解释器垫底，
+/// 便于下拉框把内置项放在最后。
+/// 注意：这只是**列表展示顺序**；实际选用见 [`resolve_interpreter_with_base`]——内置优先。
 pub fn detect_python_installations() -> Vec<PythonInstallation> {
     detect_with_bundled(bundled_python())
 }
@@ -143,7 +143,8 @@ fn detected_cached() -> &'static [PythonInstallation] {
 }
 
 /// 决定实际使用的解释器：
-/// 显式配置 > 脚本旁虚拟环境 > 系统检测到的解释器 > 随程序安装的内置解释器 > PATH 上的 python。
+/// 显式配置 > 脚本旁虚拟环境 > **随程序安装的内置解释器（程序运行目录下的 python）** >
+/// 系统检测到的解释器 > PATH 上的 python。
 /// 脚本与解释器中的相对路径都以 `base`（「程序运行目录」，一般是安装目录）为根解析。
 pub fn resolve_interpreter_with_base(app: &AppItem, base: Option<&Path>) -> Result<String, String> {
     // 快路径：已显式配置且可用就直接返回，**不触发本机解释器检测**。
@@ -200,14 +201,15 @@ fn resolve_interpreter_in(
         return Ok(venv.path);
     }
 
-    // 用户自己安装的 Python（带第三方包）优先
-    if let Some(first) = detected.first() {
-        return Ok(first.path.clone());
-    }
-
-    // 系统没有任何 Python 时，回退到安装目录自带的解释器
+    // 随程序安装的内置解释器优先：随程序发布的脚本用程序自己的运行环境，
+    // 自动补装的依赖也都装在程序目录下，位置可预期。
     if let Some(bundled) = bundled {
         return Ok(bundled.to_string_lossy().to_string());
+    }
+
+    // 没有内置解释器时，退回系统检测到的 Python
+    if let Some(first) = detected.first() {
+        return Ok(first.path.clone());
     }
 
     if version_of_command("python").is_some() {
@@ -613,9 +615,10 @@ mod tests {
         assert!(find_bundled_python(&[dir.path().to_path_buf()]).is_none());
     }
 
-    /// 系统安装的 Python（用户自己的环境）优先于内置解释器。
+    /// 随程序安装的内置解释器优先于系统 Python：随程序发布的脚本用程序自己的运行环境，
+    /// 自动补装的依赖也装在程序目录下，位置可预期。
     #[test]
-    fn system_python_preferred_over_bundled() {
+    fn bundled_python_preferred_over_system() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("job.py");
         std::fs::write(&script, b"print(1)").unwrap();
@@ -637,7 +640,7 @@ mod tests {
             &[system.clone()],
         )
         .unwrap();
-        assert_eq!(resolved, system.path);
+        assert_eq!(resolved, bundled.to_string_lossy());
     }
 
     /// 系统没有任何 Python 时，回退到安装目录自带的解释器。

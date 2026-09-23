@@ -71,7 +71,7 @@ function sourceLabel(source: string): string {
     case 'path':
       return 'PATH';
     case 'bundled':
-      return '内置';
+      return '内置（默认）';
     default:
       return source;
   }
@@ -253,13 +253,16 @@ export function AppDialog({ mode, appId, onClose, onSaved }: AppDialogProps) {
     void (async () => {
       const list = await detectPython(form.executable_path);
       if (!cancelled && list.length > 0) {
-        // 首选：脚本旁 venv > 用户自己的系统解释器 > 内置解释器（兜底）。
-        // 内置解释器保存成相对写法（python\python.exe），换安装目录依然可用
-        const preferred = list[0].relative_path || list[0].path;
+        // 首选：脚本旁虚拟环境 > 程序自带（内置）解释器 > 系统解释器。
+        // 用程序自己的运行环境，自动补装的依赖就落在程序目录下，位置可预期；
+        // 内置解释器保存成相对写法（python\python.exe），换安装目录依然可用。
+        const venv = list.find((item) => item.is_venv);
+        const bundled = list.find((item) => item.source === 'bundled');
+        const preferred = venv ?? bundled ?? list[0];
         setForm((prev) =>
           prev.python_interpreter_path.trim()
             ? prev
-            : { ...prev, python_interpreter_path: preferred },
+            : { ...prev, python_interpreter_path: preferred.relative_path || preferred.path },
         );
       }
     })();
