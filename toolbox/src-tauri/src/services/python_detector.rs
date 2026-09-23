@@ -133,11 +133,34 @@ pub fn find_venv_for_script(script_path: &str) -> Option<PythonInstallation> {
     None
 }
 
+/// 本机解释器检测结果（进程内缓存一次）。
+///
+/// 检测要 spawn `py -0p`、两次 `where`，并对每个候选跑一次 `--version`，累计几百毫秒；
+/// 每次启动都重跑会明显拖慢启动，因此只在首次需要时检测。
+fn detected_cached() -> &'static [PythonInstallation] {
+    static DETECTED: OnceLock<Vec<PythonInstallation>> = OnceLock::new();
+    DETECTED.get_or_init(detect_python_installations).as_slice()
+}
+
 /// 决定实际使用的解释器：
 /// 显式配置 > 脚本旁虚拟环境 > 系统检测到的解释器 > 随程序安装的内置解释器 > PATH 上的 python。
 /// 脚本与解释器中的相对路径都以 `base`（「程序运行目录」，一般是安装目录）为根解析。
 pub fn resolve_interpreter_with_base(app: &AppItem, base: Option<&Path>) -> Result<String, String> {
-    resolve_interpreter_in(app, bundled_python(), base, &detect_python_installations())
+    // 快路径：已显式配置且可用就直接返回，**不触发本机解释器检测**。
+    // 插件市场安装的脚本都会显式配置 `python/python.exe`，因此正常启动不会再等
+    // `py -0p` / `where` / 多个 `--version` 的那几百毫秒。
+    if let Some(configured) = app
+        .python_interpreter_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let resolved = crate::utils::resolve_path_with(base, configured);
+        if resolved.exists() {
+            return Ok(resolved.to_string_lossy().to_string());
+        }
+    }
+    resolve_interpreter_in(app, bundled_python(), base, detected_cached())
 }
 
 /// `resolve_interpreter` 的实现：内置解释器、检测列表与相对路径的根由参数注入以便测试。
