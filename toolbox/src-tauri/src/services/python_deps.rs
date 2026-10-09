@@ -205,6 +205,9 @@ pub fn site_packages_of(
 pub fn run_python(interpreter: &Path, args: &[String]) -> Result<String, String> {
     let mut cmd = Command::new(interpreter);
     cmd.args(args);
+    // 清掉继承来的 PYTHONPATH：否则探测会用别的环境（如 IDE/终端注入的系统 site-packages）
+    // 里的包，判定"不缺依赖"从而不安装，掩盖程序自带 Python 的真实缺失情况。
+    cmd.env_remove("PYTHONPATH");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -480,6 +483,43 @@ mod tests {
             find_missing_modules(Path::new(&py.path), &modules, &mut run_python).unwrap();
 
         assert_eq!(missing, vec!["__bitmind_not_a_real_module__".to_string()]);
+    }
+
+    /// 回归：探测不能被启动器继承的 `PYTHONPATH` 影响。
+    ///
+    /// 否则脚本会用别的环境（IDE / 终端注入的 site-packages）里的包，导致探测判定
+    /// 「不缺依赖」而永不安装，掩盖程序自带 Python 真实缺包的情况。
+    #[test]
+    fn probe_ignores_inherited_pythonpath() {
+        let Some(py) = crate::services::python_detector::detect_python_installations()
+            .into_iter()
+            .next()
+        else {
+            eprintln!("skip: 本机未安装 Python");
+            return;
+        };
+
+        // 造一个只存在于 PYTHONPATH 上的假模块
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zz_bitmind_env_probe.py"), "").unwrap();
+
+        let previous = std::env::var("PYTHONPATH").ok();
+        std::env::set_var("PYTHONPATH", dir.path());
+        let missing = find_missing_modules(
+            Path::new(&py.path),
+            &["zz_bitmind_env_probe".to_string()],
+            &mut run_python,
+        );
+        match previous {
+            Some(value) => std::env::set_var("PYTHONPATH", value),
+            None => std::env::remove_var("PYTHONPATH"),
+        }
+
+        assert_eq!(
+            missing.unwrap(),
+            vec!["zz_bitmind_env_probe".to_string()],
+            "探测应忽略继承的 PYTHONPATH"
+        );
     }
 
     #[test]

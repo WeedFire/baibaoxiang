@@ -2,7 +2,7 @@
 name = "toolbox"
 version = "1.0.1"
 description = "Windows app launcher and management tool"
-authors = ["you"]
+authors = ["王小草"]
 edition = "2021"
 
 [lib]

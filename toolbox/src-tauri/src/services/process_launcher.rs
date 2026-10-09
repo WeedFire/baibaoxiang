@@ -263,12 +263,13 @@ pub fn launch_app_with(app: &AppItem, notify: &mut dyn FnMut(&str)) -> Result<La
 
         // Python 脚本与 CMD 命令在不显示控制台时不弹窗
         let hide_console = !app.show_console && (app.is_python_script || kind == LaunchKind::Command);
-        return create_process(&plan, hide_console).map(|result| with_note(result));
+        return create_process(&plan, hide_console, kind.is_python())
+            .map(|result| with_note(result));
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        create_process(&plan, false).map(|result| with_note(result))
+        create_process(&plan, false, kind.is_python()).map(|result| with_note(result))
     }
 }
 
@@ -281,8 +282,17 @@ fn show_cmd(style: WindowStyle) -> i32 {
     }
 }
 
+/// 用 CreateProcess 启动。
+///
+/// `is_python` 为真时清掉继承来的 `PYTHONPATH`：启动器自身环境里的 `PYTHONPATH`
+/// （IDE、终端等注入）会让脚本去别的环境取包，掩盖"程序自带 Python 缺依赖"的真实情况。
+/// （`cmd /s /k` 包裹的方式同样经过这里，所以带控制台的 Python 脚本也一并生效。）
 #[cfg(target_os = "windows")]
-fn create_process(plan: &LaunchPlan, hide_console: bool) -> Result<LaunchResult, String> {
+fn create_process(
+    plan: &LaunchPlan,
+    hide_console: bool,
+    is_python: bool,
+) -> Result<LaunchResult, String> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -292,6 +302,9 @@ fn create_process(plan: &LaunchPlan, hide_console: bool) -> Result<LaunchResult,
     let is_cmd = program.to_lowercase().ends_with("cmd.exe");
 
     let mut cmd = Command::new(program);
+    if is_python {
+        cmd.env_remove("PYTHONPATH");
+    }
     if is_cmd {
         // 前几个是 /s /k 之类的开关，最后一个是整条命令行，必须原样传入
         if let Some((raw, rest)) = plan.args.split_last() {
@@ -322,9 +335,16 @@ fn create_process(plan: &LaunchPlan, hide_console: bool) -> Result<LaunchResult,
 }
 
 #[cfg(not(target_os = "windows"))]
-fn create_process(plan: &LaunchPlan, _hide_console: bool) -> Result<LaunchResult, String> {
+fn create_process(
+    plan: &LaunchPlan,
+    _hide_console: bool,
+    is_python: bool,
+) -> Result<LaunchResult, String> {
     let program = plan.program.trim_matches('"');
     let mut cmd = Command::new(program);
+    if is_python {
+        cmd.env_remove("PYTHONPATH");
+    }
     cmd.args(&plan.args);
     if let Some(ref dir) = plan.working_dir {
         cmd.current_dir(dir);
