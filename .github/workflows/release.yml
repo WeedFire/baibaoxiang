@@ -7,6 +7,14 @@
 #   GITHUB_TOKEN                         —— softprops/action-gh-release 会自动注入，无需手动配置
 #
 # 注意：tauri.conf.json 里的 version 必须与 tag（去掉 v 前缀）一致，否则构建失败。
+#
+# 产物去向：
+#   1) App 更新包 → 发到本仓库的 GitHub Release：
+#      `baibaoxiang_<版本>_x64-setup.exe`、`*.msi`（已签名）与 `latest.json`（客户端自动更新用）。
+#   2) 插件市场（pyTools 脚本）→ **不发 GitHub**，只打包到 dist/plugins 并作为 workflow
+#      artifact 上传，供手动发到 Gitee 仓库 `wjqnxw/baibaoxiang-plugins`（tag `plugins`）。
+#      内置 Python 运行环境插件默认在**本地**单独打包：`python/` 被 .gitignore 忽略（体积大），
+#      CI 检出时并不存在，因此这里检测到 `../python/python.exe` 才会一并打包。
 
 name: Release
 
@@ -54,6 +62,9 @@ jobs:
 
       - name: 前端 lint
         run: npm run lint
+
+      - name: 前端类型检查
+        run: npx tsc -b
 
       - name: Rust 单元测试
         run: cargo test --lib --manifest-path src-tauri/Cargo.toml
@@ -117,7 +128,9 @@ jobs:
           $bundle = "src-tauri/target/release/bundle"
           $setup = Get-ChildItem "$bundle/nsis" -Filter "*-setup.exe" | Select-Object -First 1
           if (-not $setup) { throw "未找到 NSIS 安装包" }
-          $name = "baibaoxiang_$env:VERSION_x64-setup.exe"
+          # 必须用 ${env:VERSION}：PowerShell 会把 `$env:VERSION_x64` 当成变量名（`_` 合法），
+          # 那样会拼出 baibaoxiang_-setup.exe，后续上传 glob 匹配不到。
+          $name = "baibaoxiang_${env:VERSION}_x64-setup.exe"
           Copy-Item $setup.FullName "dist/$name"
           $msi = Get-ChildItem "$bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($msi) { Copy-Item $msi.FullName dist/ }
@@ -144,21 +157,35 @@ jobs:
             --notes-file release-notes.md `
             --out dist/latest.json
 
-      - name: 打包插件市场（pyTools + 依赖目录，地址指向 Gitee）
+      - name: 打包插件市场（pyTools 脚本，下载地址指向 Gitee）
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          # Python 依赖改为声明式 pip（需要时追加 `--pip "包名>=版本"`），
-          # 不再把 site-packages 逐个打包成 zip。
-          node scripts/package-plugins.mjs `
-            --repo "wjqnxw/baibaoxiang-plugins" `
-            --tag "plugins" `
-            --plugins-dir "../pyTools" `
-            --program "../python" `
-            --meta "scripts/plugins-meta.json" `
-            --out dist/plugins
+          # Python 依赖用声明式 pip（需要时追加 `--pip "包名>=版本"`），不打包 site-packages。
+          # 内置 Python 运行环境（--program）默认不打：python/ 被 .gitignore 忽略，
+          # CI 检出时不存在；它一般在本地单独打包（--program ../python 或 ../python2）。
+          $pluginArgs = @(
+            '--repo', 'wjqnxw/baibaoxiang-plugins',
+            '--tag', 'plugins',
+            '--plugins-dir', '../pyTools',
+            '--meta', 'scripts/plugins-meta.json',
+            '--out', 'dist/plugins'
+          )
+          if (Test-Path '../python/python.exe') {
+            $pluginArgs += @('--program', '../python')
+            Write-Host '检测到 ../python，一并打包内置 Python 运行环境插件'
+          }
+          node scripts/package-plugins.mjs @pluginArgs
+
+      - name: 上传插件产物（供手动发布到 Gitee）
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-${{ github.event.inputs.tag || github.ref_name }}
+          # action 路径按仓库根解析
+          path: toolbox/dist/plugins/**
+          if-no-files-found: warn
 
       - name: 发布 GitHub Release（仅 App 更新包）
         uses: softprops/action-gh-release@v2

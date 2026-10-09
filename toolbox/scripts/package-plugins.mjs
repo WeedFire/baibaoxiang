@@ -117,14 +117,33 @@ function pipPluginId(spec) {
   return name || 'pip-package';
 }
 
-/** 在目录里找第一个 .py 文件作为默认入口 */
-function defaultEntry(dir) {
-  const files = readdirSync(dir, { withFileTypes: true }).filter(
-    (e) => e.isFile() && e.name.toLowerCase().endsWith('.py'),
-  );
-  if (files.some((f) => f.name.toLowerCase() === 'main.py')) return 'main.py';
-  if (files.length > 0) return files[0].name;
-  return '';
+/**
+ * 推断脚本入口。
+ *
+ * 顺序：`main.py` > `<id>.py` > `run_<id>.py` > `run_*.py` > 第一个非 `__init__.py` / 非 `test_*` 的 .py。
+ * （不能直接取「第一个 .py」——目录里通常有 `__init__.py`，它不是可执行入口。）
+ */
+function defaultEntry(dir, id) {
+  const files = readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.py'))
+    .map((e) => e.name);
+  const byName = (name) => files.find((f) => f.toLowerCase() === name.toLowerCase());
+
+  const preferred =
+    byName('main.py') ??
+    byName(`${id}.py`) ??
+    byName(`run_${id}.py`) ??
+    files.find((f) => f.toLowerCase().startsWith('run_')) ??
+    files.find((f) => !isHelperFile(f));
+
+  // 极端情况（目录里只有 __init__.py）：仍回退到第一个 .py，避免插件没有入口
+  return preferred ?? files[0] ?? '';
+}
+
+/** `__init__.py` 与测试文件都不是入口。 */
+function isHelperFile(name) {
+  const lower = name.toLowerCase();
+  return lower === '__init__.py' || lower.startsWith('test_') || lower.endsWith('_test.py');
 }
 
 function buildPlugin(rootDir, id, fallbackKind) {
@@ -137,7 +156,8 @@ function buildPlugin(rootDir, id, fallbackKind) {
   const version = meta.version ?? (/\d+\.\d+/.test(tag) ? tag.replace(/^v/, '') : '1.0.0');
   const kind = meta.kind ?? fallbackKind;
   const entry =
-    meta.entry ?? (kind === 'python_script' || kind === 'program' ? defaultEntry(dir) : '');
+    meta.entry ??
+    (kind === 'python_script' || kind === 'program' ? defaultEntry(dir, id) : '');
   const launchKind = meta.launch_kind ?? (kind === 'python_script' ? 1 : 0);
   const interpreter = meta.interpreter ?? (kind === 'python_script' ? 'python/python.exe' : '');
 
