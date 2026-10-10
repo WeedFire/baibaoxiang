@@ -19,6 +19,16 @@ pub fn app_base_dir() -> Option<&'static Path> {
     APP_BASE_DIR.get().map(|dir| dir.as_path())
 }
 
+/// 给 Python 子进程强制 UTF-8 输出。
+///
+/// 中文 Windows 上，Python 的 stdout/stderr 走管道（非控制台）时默认用系统 ANSI 代码页
+/// （GBK/CP936）编码；Rust 端用 `String::from_utf8_lossy` 按 UTF-8 解码会把中文解成乱码。
+/// 设置这两个变量后，Python 的标准输出与文件系统编码都改为 UTF-8，乱码问题根治。
+pub fn force_python_utf8(cmd: &mut std::process::Command) {
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
+}
+
 /// 去掉首尾空白与成对引号：用户常直接从资源管理器复制带引号的路径。
 fn clean_input(input: &str) -> String {
     input.trim().trim_matches('"').trim().to_string()

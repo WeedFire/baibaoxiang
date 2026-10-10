@@ -208,6 +208,8 @@ pub fn run_python(interpreter: &Path, args: &[String]) -> Result<String, String>
     // 清掉继承来的 PYTHONPATH：否则探测会用别的环境（如 IDE/终端注入的系统 site-packages）
     // 里的包，判定"不缺依赖"从而不安装，掩盖程序自带 Python 的真实缺失情况。
     cmd.env_remove("PYTHONPATH");
+    // 强制 UTF-8 输出：中文 Windows 上 Python 走管道默认按 GBK 输出，按 UTF-8 解码会乱码。
+    crate::utils::force_python_utf8(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -225,6 +227,13 @@ pub fn run_python(interpreter: &Path, args: &[String]) -> Result<String, String>
         } else {
             stderr.trim()
         };
+        // 「No module named pip」通常是内置 Python 缺 pip（打包/安装不全），给出明确指引。
+        if detail.to_lowercase().contains("no module named pip") {
+            return Err(format!(
+                "内置 Python 缺少 pip：请在「插件市场」重新安装「Python 运行环境」程序包（需包含 Lib/site-packages/pip）。详情: {}",
+                tail_chars(detail, 200)
+            ));
+        }
         return Err(format!("Python 执行失败: {}", tail_chars(detail, 400)));
     }
     // stderr 也带上：pip 的「改装到用户目录」等警告都在 stderr，调用方要据此提示用户

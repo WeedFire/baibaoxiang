@@ -121,10 +121,18 @@ pub fn filename_from_url(url: &str) -> Option<String> {
     }
 }
 
-/// 构造带原生 TLS 的 ureq 代理（与更新检查用同一套配置，避免 rustls 缺失 panic）。
+/// 构造带原生 TLS 的 ureq 代理（更新检查、插件市场、下载共用同一套配置）。
+///
+/// **必须显式指定 `RootCerts::PlatformVerifier`（走操作系统证书库）**：
+/// ureq 的 `TlsConfig` 默认是 `RootCerts::WebPki`，对 native-tls 而言等于
+/// 「禁用系统内置根 + 只用打包的 Mozilla 根证书快照」（`disable_built_in_roots(true)`）。
+/// 一旦服务器证书轮换、或用户走了公司/运营商代理（链的根不是快照里的根），
+/// 握手就会失败并报 `native-tls: unable to find any user-specified roots in the final cert chain`。
+/// 用系统证书库（Windows 会自动更新，且包含企业 CA）即可避免。
 pub fn build_agent(timeout: Duration) -> ureq::Agent {
     let tls_config = ureq::tls::TlsConfig::builder()
         .provider(ureq::tls::TlsProvider::NativeTls)
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
         .build();
     let config = ureq::config::Config::builder()
         .timeout_global(Some(timeout))
@@ -433,6 +441,21 @@ mod tests {
 
     fn parse(json: &str) -> UpdateManifest {
         serde_json::from_str(json).expect("清单应能解析")
+    }
+
+    #[test]
+    fn 代理必须走系统根证书库() {
+        let agent = build_agent(Duration::from_secs(5));
+        assert!(matches!(
+            agent.config().tls_config().provider(),
+            ureq::tls::TlsProvider::NativeTls
+        ));
+        // 必须用系统证书库：ureq 默认的 WebPki 对 native-tls 等于「禁用内置根 + 只用打包快照」，
+        // 证书轮换或公司代理场景会报 `unable to find any user-specified roots in the final cert chain`
+        assert!(matches!(
+            agent.config().tls_config().root_certs(),
+            ureq::tls::RootCerts::PlatformVerifier
+        ));
     }
 
     #[test]

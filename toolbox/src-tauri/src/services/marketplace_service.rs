@@ -164,6 +164,8 @@ pub fn install_pip_dependency_with(
 fn run_pip_install(python: &Path, args: &[String]) -> Result<String, String> {
     let mut cmd = std::process::Command::new(python);
     cmd.args(args);
+    // 强制 UTF-8 输出：中文 Windows 上 Python 走管道默认按 GBK 输出，按 UTF-8 解码会乱码。
+    crate::utils::force_python_utf8(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -181,6 +183,12 @@ fn run_pip_install(python: &Path, args: &[String]) -> Result<String, String> {
         } else {
             stderr.trim()
         };
+        if detail.to_lowercase().contains("no module named pip") {
+            return Err(format!(
+                "内置 Python 缺少 pip：请重新安装「Python 运行环境」程序包（需包含 Lib/site-packages/pip）。详情: {}",
+                tail_chars(detail, 200)
+            ));
+        }
         return Err(format!("pip 安装失败: {}", tail_chars(detail, 500)));
     }
     Ok(stdout)
