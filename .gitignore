@@ -34,3 +34,8 @@ python/
 
 /python-deps/
 /python2/
+
+# Python 编译缓存与元数据（不入库，避免仓库膨胀）
+__pycache__/
+*.pyc
+*.pyo
