@@ -21,6 +21,35 @@
   animation: launch-notice-in 0.18s ease-out;
 }
 
+/* 进行中的启动进度（如「正在安装依赖」）：带转圈，不自动消失 */
+.launch-notice-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.launch-notice-spinner {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: launch-notice-spin 0.8s linear infinite;
+}
+
+.launch-notice-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+@keyframes launch-notice-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @keyframes launch-notice-in {
   from {
     opacity: 0;

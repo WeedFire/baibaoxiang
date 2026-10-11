@@ -192,6 +192,16 @@ pub fn launch_app_with(app: &AppItem, notify: &mut dyn FnMut(&str)) -> Result<La
     let kind = LaunchKind::of(app);
     let plan = build_launch_plan(app)?;
 
+    // Qt 平台插件路径：中文安装路径下 Qt 无法自行定位平台插件会导致 QApplication 崩溃，
+    // 启动 Python 脚本前先定位好，随进程环境一并传给子进程。
+    let qt_plugins = if kind.is_python() {
+        resolve_interpreter_with_base(app, crate::utils::app_base_dir())
+            .ok()
+            .and_then(|interp| qt_platform_plugin_path(Path::new(&interp)))
+    } else {
+        None
+    };
+
     // 网页不做进程管理，直接交给系统浏览器
     if let LaunchKind::Web = kind {
         open_url(&plan.program)?;
@@ -263,14 +273,42 @@ pub fn launch_app_with(app: &AppItem, notify: &mut dyn FnMut(&str)) -> Result<La
 
         // Python 脚本与 CMD 命令在不显示控制台时不弹窗
         let hide_console = !app.show_console && (app.is_python_script || kind == LaunchKind::Command);
-        return create_process(&plan, hide_console, kind.is_python())
+        return create_process(&plan, hide_console, kind.is_python(), qt_plugins.as_deref())
             .map(|result| with_note(result));
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        create_process(&plan, false, kind.is_python()).map(|result| with_note(result))
+        create_process(&plan, false, kind.is_python(), qt_plugins.as_deref())
+            .map(|result| with_note(result))
     }
+}
+
+/// 从解释器路径定位 Qt 平台插件目录（`platforms`）。
+///
+/// Qt（PyQt5/PySide6/PyQt6）在**非 ASCII 安装路径**下无法自行定位平台插件，
+/// `QApplication` 会直接崩溃（0xC0000409，弹「no Qt platform plugin could be initialized」）。
+/// 显式设置 `QT_QPA_PLATFORM_PLUGIN_PATH` 可绕过 Qt 有缺陷的默认路径推导（已实测有效）。
+/// 这里按解释器路径反推 site-packages（完整安装 = `<根>/Lib/site-packages`，虚拟环境 = `<venv>/Lib/site-packages`），
+/// 再定位常见 Qt 绑定的 `plugins/platforms`。
+fn qt_platform_plugin_path(interpreter: &Path) -> Option<String> {
+    let exe_dir = interpreter.parent()?;
+    let mut site_candidates = vec![exe_dir.join("Lib").join("site-packages")];
+    // 虚拟环境：python.exe 位于 <venv>/Scripts 下
+    if let Some(parent) = exe_dir.parent() {
+        site_candidates.push(parent.join("Lib").join("site-packages"));
+    }
+    for sp in site_candidates {
+        for binding in ["PyQt5", "PySide6", "PyQt6", "PySide2"] {
+            for ver in ["Qt5", "Qt", "Qt6"] {
+                let dir = sp.join(binding).join(ver).join("plugins").join("platforms");
+                if dir.is_dir() {
+                    return Some(dir.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -292,6 +330,7 @@ fn create_process(
     plan: &LaunchPlan,
     hide_console: bool,
     is_python: bool,
+    qt_plugins: Option<&str>,
 ) -> Result<LaunchResult, String> {
     use std::os::windows::process::CommandExt;
 
@@ -304,6 +343,9 @@ fn create_process(
     let mut cmd = Command::new(program);
     if is_python {
         cmd.env_remove("PYTHONPATH");
+    }
+    if let Some(plugins) = qt_plugins {
+        cmd.env("QT_QPA_PLATFORM_PLUGIN_PATH", plugins);
     }
     if is_cmd {
         // 前几个是 /s /k 之类的开关，最后一个是整条命令行，必须原样传入
@@ -339,11 +381,15 @@ fn create_process(
     plan: &LaunchPlan,
     _hide_console: bool,
     is_python: bool,
+    qt_plugins: Option<&str>,
 ) -> Result<LaunchResult, String> {
     let program = plan.program.trim_matches('"');
     let mut cmd = Command::new(program);
     if is_python {
         cmd.env_remove("PYTHONPATH");
+    }
+    if let Some(plugins) = qt_plugins {
+        cmd.env("QT_QPA_PLATFORM_PLUGIN_PATH", plugins);
     }
     cmd.args(&plan.args);
     if let Some(ref dir) = plan.working_dir {
@@ -537,6 +583,27 @@ pub fn reveal_in_explorer(path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locates_qt_platform_plugins_dir() {
+        // 完整安装布局：<root>/python.exe，<root>/Lib/site-packages/PyQt5/Qt5/plugins/platforms
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = dir.path().join("Lib/site-packages/PyQt5/Qt5/plugins/platforms");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let got = qt_platform_plugin_path(&dir.path().join("python.exe")).unwrap();
+        assert_eq!(Path::new(&got), plugins.as_path());
+
+        // 虚拟环境布局：<venv>/Scripts/python.exe，<venv>/Lib/site-packages/PySide6/Qt/plugins/platforms
+        let venv = tempfile::tempdir().unwrap();
+        let plugins2 = venv.path().join("Lib/site-packages/PySide6/Qt/plugins/platforms");
+        std::fs::create_dir_all(&plugins2).unwrap();
+        let got2 = qt_platform_plugin_path(&venv.path().join("Scripts/python.exe")).unwrap();
+        assert_eq!(Path::new(&got2), plugins2.as_path());
+
+        // 没有 Qt 时返回 None
+        let empty = tempfile::tempdir().unwrap();
+        assert!(qt_platform_plugin_path(&empty.path().join("python.exe")).is_none());
+    }
 
     fn make_app() -> AppItem {
         AppItem {

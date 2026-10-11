@@ -7,12 +7,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter};
 
-/// 启动过程中把提示推给前端（例如「正在自动安装 Python 依赖」）。
-fn emit_launch_progress(app: &AppHandle, app_id: &str, message: &str) {
+/// 启动过程事件：`phase` 区分「进行中（progress）」与「结束（done）」，
+/// 前端据此把「正在安装依赖」这类提示保持显示，直到收到 done 才清除。
+fn emit_launch_event(app: &AppHandle, app_id: &str, message: &str, phase: &str) {
     let _ = app.emit(
         "app://launch-progress",
-        serde_json::json!({ "app_id": app_id, "message": message }),
+        serde_json::json!({ "app_id": app_id, "message": message, "phase": phase }),
     );
+}
+
+/// 启动过程中的提示（例如「正在自动安装 Python 依赖」）。
+fn emit_launch_progress(app: &AppHandle, app_id: &str, message: &str) {
+    emit_launch_event(app, app_id, message, "progress");
+}
+
+/// 启动结束（成功或失败），通知前端清除进行中的进度提示。
+fn emit_launch_done(app: &AppHandle, app_id: &str, message: &str) {
+    emit_launch_event(app, app_id, message, "done");
 }
 
 
@@ -33,42 +44,56 @@ pub struct LaunchStats {
     pub frequent: Vec<AppItem>,
 }
 
-#[tauri::command]
-pub fn launch_app(app: AppHandle, app_id: String) -> Result<LaunchResult, String> {
-    let conn = db::get_connection(&app)?;
-    let app_item = data_service::get_app_by_id(&conn, &app_id)?;
+/// 启动应用的实际执行：丢到阻塞线程池，避免卡住主线程导致窗口「未响应」。
+///
+/// 首次运行 Python 脚本时会先探测缺失依赖并 `pip install`（可能持续数十秒到几分钟），
+/// 这一步是阻塞操作，必须在后台线程执行；进度通过 `app://launch-progress` 事件推给前端。
+async fn run_launch_blocking(
+    app: AppHandle,
+    app_id: String,
+    run_as_admin: bool,
+) -> Result<LaunchResult, String> {
+    let emitter = app.clone();
+    let task_id = app_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db::get_connection(&emitter)?;
+        let mut app_item = data_service::get_app_by_id(&conn, &task_id)?;
+        if run_as_admin {
+            app_item.run_as_admin = true;
+        }
 
-    // 右键菜单里可以临时以管理员身份运行，走独立的命令
-    let result = process_launcher::launch_app_with(&app_item, &mut |message| {
-        emit_launch_progress(&app, &app_id, message)
-    })?;
+        let launch = process_launcher::launch_app_with(&app_item, &mut |message| {
+            emit_launch_progress(&emitter, &task_id, message)
+        });
 
-    if result.ok {
-        let _ = conn.execute(
-            "INSERT INTO launch_history (app_id) VALUES (?)",
-            params![app_id],
-        );
-    }
+        // 无论成败都发结束事件，前端据此清除「进行中」提示。
+        let done_msg = match &launch {
+            Ok(l) => l.message.clone(),
+            Err(e) => e.clone(),
+        };
+        emit_launch_done(&emitter, &task_id, done_msg.as_str());
 
-    Ok(result)
+        let launch = launch?;
+        if launch.ok {
+            let _ = conn.execute(
+                "INSERT INTO launch_history (app_id) VALUES (?)",
+                params![task_id],
+            );
+        }
+        Ok(launch)
+    })
+    .await
+    .map_err(|e| format!("启动任务异常: {}", e))?
 }
 
 #[tauri::command]
-pub fn launch_app_as_admin(app: AppHandle, app_id: String) -> Result<LaunchResult, String> {
-    let conn = db::get_connection(&app)?;
-    let mut app_item = data_service::get_app_by_id(&conn, &app_id)?;
-    app_item.run_as_admin = true;
+pub async fn launch_app(app: AppHandle, app_id: String) -> Result<LaunchResult, String> {
+    run_launch_blocking(app, app_id, false).await
+}
 
-    let result = process_launcher::launch_app_with(&app_item, &mut |message| {
-        emit_launch_progress(&app, &app_id, message)
-    })?;
-    if result.ok {
-        let _ = conn.execute(
-            "INSERT INTO launch_history (app_id) VALUES (?)",
-            params![app_id],
-        );
-    }
-    Ok(result)
+#[tauri::command]
+pub async fn launch_app_as_admin(app: AppHandle, app_id: String) -> Result<LaunchResult, String> {
+    run_launch_blocking(app, app_id, true).await
 }
 
 #[tauri::command]

@@ -293,6 +293,8 @@ export async function listenMarketplaceProgress(
 export interface LaunchProgress {
   app_id: string;
   message: string;
+  /** progress = 进行中（保持显示直到 done）；done = 启动结束（清除进行中提示） */
+  phase?: 'progress' | 'done';
 }
 
 /** 订阅应用启动过程中的提示，返回取消订阅函数 */
