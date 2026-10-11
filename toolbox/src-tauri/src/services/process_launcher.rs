@@ -192,16 +192,6 @@ pub fn launch_app_with(app: &AppItem, notify: &mut dyn FnMut(&str)) -> Result<La
     let kind = LaunchKind::of(app);
     let plan = build_launch_plan(app)?;
 
-    // Qt 平台插件路径：中文安装路径下 Qt 无法自行定位平台插件会导致 QApplication 崩溃，
-    // 启动 Python 脚本前先定位好，随进程环境一并传给子进程。
-    let qt_plugins = if kind.is_python() {
-        resolve_interpreter_with_base(app, crate::utils::app_base_dir())
-            .ok()
-            .and_then(|interp| qt_platform_plugin_path(Path::new(&interp)))
-    } else {
-        None
-    };
-
     // 网页不做进程管理，直接交给系统浏览器
     if let LaunchKind::Web = kind {
         open_url(&plan.program)?;
@@ -227,6 +217,18 @@ pub fn launch_app_with(app: &AppItem, notify: &mut dyn FnMut(&str)) -> Result<La
             Err(e) => notify(&format!("自动补齐依赖未完成（不影响启动）：{}", e)),
         }
     }
+
+    // Qt 平台插件路径：中文安装路径下 Qt 无法自行定位平台插件会导致 QApplication 崩溃。
+    // 必须在「自动补齐依赖」之后再定位：首次运行时 PyQt5 此刻才被 pip 装好，
+    // 提前定位会因目录尚不存在而返回 None，导致本次启动仍报 Qt 插件错误（重启后才正常）。
+    let qt_plugins = if kind.is_python() {
+        resolve_interpreter_with_base(app, crate::utils::app_base_dir())
+            .ok()
+            .and_then(|interp| qt_platform_plugin_path(Path::new(&interp)))
+    } else {
+        None
+    };
+
     let with_note = |mut result: LaunchResult| -> LaunchResult {
         if let Some(note) = &deps_note {
             result.message = format!("{}（{}）", result.message, note);

@@ -13,8 +13,12 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 /// 探测脚本：模块名列表以 JSON 形式从 `argv[1]` 传入，缺失的模块以带标记的 JSON 打印。
+/// 可选 `argv[2]` 为脚本所在目录，会先插入 `sys.path`，使脚本的同目录本地模块（如
+/// `from excel_merge_dialog import ...`）能被 `find_spec` 找到，避免误判为「缺依赖」。
 const PROBE_CODE: &str = r#"
 import importlib.util, json, sys
+if len(sys.argv) > 2 and sys.argv[2]:
+    sys.path.insert(0, sys.argv[2])
 missing = []
 for name in json.loads(sys.argv[1]):
     try:
@@ -115,9 +119,13 @@ pub fn parse_missing(stdout: &str) -> Vec<String> {
 // ---------------- 探测与安装（runner 可注入以便测试） ----------------
 
 /// 用解释器探测哪些模块缺失。
+///
+/// `script_dir` 为脚本所在目录，会注入探测进程的 `sys.path`，使脚本同目录的本地模块
+/// （`from xxx import ...`）不被误判为缺失；传 `None` 表示不注入。
 pub fn find_missing_modules(
     interpreter: &Path,
     modules: &[String],
+    script_dir: Option<&Path>,
     run: &mut dyn FnMut(&Path, &[String]) -> Result<String, String>,
 ) -> Result<Vec<String>, String> {
     if modules.is_empty() {
@@ -125,7 +133,10 @@ pub fn find_missing_modules(
     }
     let payload =
         serde_json::to_string(modules).map_err(|e| format!("序列化模块列表失败: {}", e))?;
-    let args = vec!["-c".to_string(), PROBE_CODE.to_string(), payload];
+    let mut args = vec!["-c".to_string(), PROBE_CODE.to_string(), payload];
+    if let Some(dir) = script_dir {
+        args.push(dir.to_string_lossy().to_string());
+    }
     let stdout = run(interpreter, &args)?;
     Ok(parse_missing(&stdout))
 }
@@ -144,7 +155,7 @@ pub fn ensure_script_dependencies_with(
         return Ok(Vec::new());
     }
 
-    let missing = find_missing_modules(interpreter, &modules, run)?;
+    let missing = find_missing_modules(interpreter, &modules, script.parent(), run)?;
     if missing.is_empty() {
         return Ok(Vec::new());
     }
@@ -427,7 +438,8 @@ mod tests {
         assert_eq!(installed, vec!["numpy", "opencv-python"]);
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[0][0], "-c");
-        assert_eq!(calls[0].len(), 3);
+        // 参数为 -c + 探测脚本 + 模块列表 + 脚本目录（用于识别同目录本地模块）
+        assert_eq!(calls[0].len(), 4);
         assert_eq!(
             calls[1],
             vec!["-m", "pip", "install", "numpy", "opencv-python"]
@@ -489,9 +501,45 @@ mod tests {
 
         let modules = vec!["sys".to_string(), "__bitmind_not_a_real_module__".to_string()];
         let missing =
-            find_missing_modules(Path::new(&py.path), &modules, &mut run_python).unwrap();
+            find_missing_modules(Path::new(&py.path), &modules, None, &mut run_python).unwrap();
 
         assert_eq!(missing, vec!["__bitmind_not_a_real_module__".to_string()]);
+    }
+
+    /// 回归：脚本 `from xxx import ...` 导入的同目录本地模块不应被判为「缺依赖」。
+    ///
+    /// 否则像 `excel_merge` 这种 `from excel_merge_dialog import ...` 的多文件脚本，
+    /// 每次启动都会被误判缺 `excel_merge_dialog`，反复尝试 pip 安装（且安装失败、永不缓存）。
+    #[test]
+    fn real_probe_ignores_local_sibling_modules() {
+        let Some(py) = crate::services::python_detector::detect_python_installations()
+            .into_iter()
+            .next()
+        else {
+            eprintln!("skip: 本机未安装 Python");
+            return;
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zz_bitmind_local_mod.py"), "# local\n").unwrap();
+
+        let modules = vec![
+            "zz_bitmind_local_mod".to_string(),
+            "__bitmind_not_a_real_module__".to_string(),
+        ];
+        let missing = find_missing_modules(
+            Path::new(&py.path),
+            &modules,
+            Some(dir.path()),
+            &mut run_python,
+        )
+        .unwrap();
+
+        assert_eq!(
+            missing,
+            vec!["__bitmind_not_a_real_module__".to_string()],
+            "同目录本地模块不应被判为缺失"
+        );
     }
 
     /// 回归：探测不能被启动器继承的 `PYTHONPATH` 影响。
@@ -517,6 +565,7 @@ mod tests {
         let missing = find_missing_modules(
             Path::new(&py.path),
             &["zz_bitmind_env_probe".to_string()],
+            None,
             &mut run_python,
         );
         match previous {
