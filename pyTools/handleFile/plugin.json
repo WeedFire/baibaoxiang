@@ -1,0 +1,8 @@
+{
+  "name": "文件清理助手",
+  "description": "根据Excel配置待删除的文件或文件夹，对指定路径下的文件或文件夹进行批量删除，删除后放在回收站，可供用户进行恢复",
+  "author": "王小草",
+  "version": "1.0.0",
+  "kind": "python_script",
+  "launch_kind": 1
+}

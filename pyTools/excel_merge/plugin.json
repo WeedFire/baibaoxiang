@@ -1,0 +1,9 @@
+{
+  "name": "Excel 合并工具",
+  "description": "根据指定列匹配合并两个 Excel 文件\n支持不同列名匹配、选择列复制、left/inner 合并模式",
+  "author": "王小草",
+  "version": "1.0.0",
+  "kind": "python_script",
+  "entry": "run_excel_merge.py",
+  "launch_kind": 1
+}
