@@ -1,0 +1,8 @@
+{
+  "name": "文件大小扫描",
+  "description": "根据输入，扫描出指定路径下所有大于设定值的文件",
+  "author": "王小草",
+  "version": "1.0.0",
+  "kind": "python_script",
+  "launch_kind": 1
+}

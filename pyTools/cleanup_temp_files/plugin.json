@@ -1,0 +1,9 @@
+{
+  "name": "删除临时文件",
+  "description": "删除系统临时文件",
+  "author": "王小草",
+  "version": "1.0.0",
+  "kind": "python_script",
+  "entry": "cleanup_temp_files.bat",
+  "launch_kind": 0
+}

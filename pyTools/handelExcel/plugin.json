@@ -1,0 +1,8 @@
+{
+  "name": "合并多个Excel文件到一个Excel文件中",
+  "description": "合并多个Excel文件到一个Excel文件中",
+  "author": "王小草",
+  "version": "1.0.0",
+  "kind": "python_script",
+  "launch_kind": 1
+}
